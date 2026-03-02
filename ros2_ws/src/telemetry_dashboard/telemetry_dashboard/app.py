@@ -17,11 +17,12 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 
-from go2_msgs.msg import QDq, MpcForces, LocomotionCmd
+from go2_msgs.msg import QDq, LocomotionCmd
 from sensor_msgs.msg import Joy
 from unitree_go.msg import LowState
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
+from telemetry_dashboard import launch_process_manager
 
 
 def quat_to_rpy(qw: float, qx: float, qy: float, qz: float) -> Tuple[float, float, float]:
@@ -51,8 +52,7 @@ class TelemetryNode(Node):
 
         self.qdq_topic = self.declare_parameter("qdq_topic", "/qdq").value
         self.qdq_est_topic = self.declare_parameter("qdq_est_topic", "/qdq_est").value
-        self.cmd_topic = self.declare_parameter("locomotion_cmd_topic", "/locomotion_cmd_state").value
-        self.mpc_forces_topic = self.declare_parameter("mpc_forces_topic", "/mpc_forces").value
+        self.cmd_topic = self.declare_parameter("locomotion_cmd_topic", "/locomotion_cmd").value
         self.history_sec = float(self.declare_parameter("history_sec", 20.0).value)
         self.max_samples = int(self.declare_parameter("max_samples", 6000).value)
         self.max_plot_points = int(self.declare_parameter("max_plot_points", 1000).value)
@@ -91,9 +91,6 @@ class TelemetryNode(Node):
         self._cmd_yaw = deque(maxlen=self.max_samples)
         self._cmd_gait = deque(maxlen=self.max_samples)
 
-        self._t_grf: Deque[float] = deque(maxlen=self.max_samples)
-        self._grf_z = [deque(maxlen=self.max_samples) for _ in range(4)]
-
         self._status: Dict[str, Tuple[bool, float]] = {}
         self._topic_available: Dict[str, bool] = {}
         self._topic_rate: Dict[str, float] = {}
@@ -101,7 +98,6 @@ class TelemetryNode(Node):
         self._topic_names = {
             "qdq": str(self.qdq_topic),
             "qdq_est": str(self.qdq_est_topic),
-            "mpc_forces": "/mpc_forces",
             "lowstate": "/lowstate",
             "joy": "/joy",
         }
@@ -109,12 +105,9 @@ class TelemetryNode(Node):
         self.create_subscription(QDq, str(self.qdq_topic), self.on_qdq, qos)
         self.create_subscription(QDq, str(self.qdq_est_topic), self.on_qdq_est, qos)
         self.create_subscription(LocomotionCmd, str(self.cmd_topic), self.on_cmd, qos)
-        self.create_subscription(MpcForces, str(self.mpc_forces_topic), self.on_grf, qos)
         self.create_subscription(LowState, "/lowstate", self.on_lowstate, qos)
         self.create_subscription(Joy, "/joy", self.on_joy, qos)
 
-        self.create_subscription(Bool, "/status/mpc/is_running",
-                                 lambda m: self.on_status("mpc", m), status_qos)
         self.create_subscription(Bool, "/status/inekf/is_running",
                                  lambda m: self.on_status("inekf", m), status_qos)
         self.create_subscription(Bool, "/status/loco_ctrl/is_running",
@@ -187,22 +180,6 @@ class TelemetryNode(Node):
             self._cmd_yaw.append(float(msg.yaw_rate))
             self._cmd_gait.append(float(msg.gait_hz))
 
-    def on_grf(self, msg: MpcForces) -> None:
-        t = time.monotonic()
-        with self._lock:
-            self._status["mpc_forces"] = (True, t)
-            self._update_topic_rate("mpc_forces", t)
-            if self._t0_q is None:
-                self._t0_q = t
-            t_rel = t - self._t0_q
-            self._t_grf.append(t_rel)
-            forces = list(msg.forces)
-            if len(forces) < 12:
-                forces += [0.0] * (12 - len(forces))
-            fz = [forces[2], forces[5], forces[8], forces[11]]
-            for i in range(4):
-                self._grf_z[i].append(float(fz[i]))
-
     def on_lowstate(self, msg: LowState) -> None:
         with self._lock:
             self._status["lowstate"] = (True, time.monotonic())
@@ -257,8 +234,6 @@ class TelemetryNode(Node):
                     list(self._cmd_yaw),
                     list(self._cmd_gait),
                 ],
-                "t_grf": list(self._t_grf),
-                "grf_z": [list(buf) for buf in self._grf_z],
                 "status": dict(self._status),
                 "topic_available": dict(self._topic_available),
                 "topic_rate": dict(self._topic_rate),
@@ -283,10 +258,6 @@ def get_ros_node() -> TelemetryNode:
         st.session_state["ros_node_name"] = f"telemetry_dashboard_{os.getpid()}_{uuid.uuid4().hex[:6]}"
 
     node = TelemetryNode(st.session_state["ros_node_name"])
-    st.session_state["svc_start"] = node.create_client(Trigger, "/launch/mujoco_robot/start")
-    st.session_state["svc_stop"] = node.create_client(Trigger, "/launch/mujoco_robot/stop")
-    st.session_state["svc_ctrl_start"] = node.create_client(Trigger, "/launch/control_stack/start")
-    st.session_state["svc_ctrl_stop"] = node.create_client(Trigger, "/launch/control_stack/stop")
     st.session_state["svc_emergency_stop"] = node.create_client(Trigger, "/loco_ctrl/emergency_stop")
     executor = rclpy.executors.SingleThreadedExecutor()
     executor.add_node(node)
@@ -323,23 +294,14 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
     labels = [
         ("mujoco", "MuJoCo"),
         ("inekf", "State Estimator"),
-        ("control_stack", "Locomotion Controller"),
+        ("rl_controller", "RL Controller"),
         ("safety_stop", "Safety Stop"),
     ]
-
-    mpc_val = _get_fresh_status(status_map, "mpc", now, timeout)
-    loco_val = _get_fresh_status(status_map, "loco_ctrl", now, timeout)
-    if mpc_val is True and loco_val is True:
-        control_stack_val = True
-    elif mpc_val is False or loco_val is False:
-        control_stack_val = False
-    else:
-        control_stack_val = None
 
     status_view = {
         "mujoco": _get_fresh_status(status_map, "mujoco", now, timeout),
         "inekf": _get_fresh_status(status_map, "inekf", now, timeout),
-        "control_stack": control_stack_val,
+        "rl_controller": _get_fresh_status(status_map, "loco_ctrl", now, timeout),
         "safety_stop": _get_fresh_status(status_map, "safety_stop", now, timeout),
     }
 
@@ -362,7 +324,7 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
                 if val:
                     st.success(f"{label}: running")
                 else:
-                    if key == "control_stack":
+                    if key == "rl_controller":
                         st.warning(f"{label}: awaiting states")
                     elif key == "inekf":
                         st.warning(f"{label}: awaiting robot data")
@@ -528,55 +490,47 @@ def main() -> None:
 
     st.sidebar.header("Settings")
     status_map = snapshot["status"]
-    mujoco_running = _get_fresh_status(
+    mujoco_status_running = _get_fresh_status(
         status_map,
         "mujoco",
         time.monotonic(),
         float(snapshot["status_timeout_s"]),
     ) is True
-    loco_ctrl_status = _get_fresh_status(
+    mujoco_running = mujoco_status_running or launch_process_manager.is_running("mujoco_robot")
+    rl_ctrl_status = _get_fresh_status(
         status_map,
         "loco_ctrl",
         time.monotonic(),
         float(snapshot["status_timeout_s"]),
     )
-    mpc_status = _get_fresh_status(
-        status_map,
-        "mpc",
-        time.monotonic(),
-        float(snapshot["status_timeout_s"]),
-    )
-    locomotion_active = (loco_ctrl_status is False) or (mpc_status is False) or (loco_ctrl_status is True and mpc_status is True)
+    # Consider control stack active when the RL controller status stream is alive.
+    locomotion_active = (rl_ctrl_status is not None) or launch_process_manager.is_running("control_stack")
     col_start, col_stop = st.sidebar.columns(2)
     if col_start.button("Start MuJoCo", key="start_mujoco", disabled=mujoco_running):
-        client = st.session_state.get("svc_start")
-        if client is None or not client.service_is_ready():
-            st.sidebar.warning("Start service not available")
+        ok, msg = launch_process_manager.start_launch("mujoco_robot", "mujoco_robot.launch.py")
+        if ok:
+            st.sidebar.info(msg)
         else:
-            client.call_async(Trigger.Request())
-            st.sidebar.info("Start request sent")
+            st.sidebar.warning(msg)
     if col_stop.button("Stop MuJoCo", key="stop_mujoco", disabled=not mujoco_running):
-        client = st.session_state.get("svc_stop")
-        if client is None or not client.service_is_ready():
-            st.sidebar.warning("Stop service not available")
+        ok, msg = launch_process_manager.stop_launch("mujoco_robot")
+        if ok:
+            st.sidebar.info(msg)
         else:
-            client.call_async(Trigger.Request())
-            st.sidebar.info("Stop request sent")
+            st.sidebar.warning(msg)
     col_ctrl_start, col_ctrl_stop = st.sidebar.columns(2)
     if col_ctrl_start.button("Start Control Stack", key="start_ctrl", disabled=locomotion_active):
-        client = st.session_state.get("svc_ctrl_start")
-        if client is None or not client.service_is_ready():
-            st.sidebar.warning("Control Stack start service not available")
+        ok, msg = launch_process_manager.start_launch("control_stack", "control_stack.launch.py")
+        if ok:
+            st.sidebar.info(msg)
         else:
-            client.call_async(Trigger.Request())
-            st.sidebar.info("Control Stack start request sent")
+            st.sidebar.warning(msg)
     if col_ctrl_stop.button("Stop Control Stack", key="stop_ctrl", disabled=not locomotion_active):
-        client = st.session_state.get("svc_ctrl_stop")
-        if client is None or not client.service_is_ready():
-            st.sidebar.warning("Control Stack stop service not available")
+        ok, msg = launch_process_manager.stop_launch("control_stack")
+        if ok:
+            st.sidebar.info(msg)
         else:
-            client.call_async(Trigger.Request())
-            st.sidebar.info("Control Stack stop request sent")
+            st.sidebar.warning(msg)
     if st.sidebar.button("EMERGENCY STOP", key="emergency_stop", use_container_width=True):
         client = st.session_state.get("svc_emergency_stop")
         if client is None or not client.service_is_ready():
@@ -625,7 +579,6 @@ def main() -> None:
             data_mode = "True State (Simulator)"
     show_rpy = st.sidebar.checkbox("Show RPY", value=False)
     show_cmd = st.sidebar.checkbox("Show Cmd", value=False)
-    show_grf = st.sidebar.checkbox("Show GRF", value=False)
     max_points = int(snapshot.get("max_plot_points", 1000))
 
     st.subheader("Modules")
@@ -642,7 +595,6 @@ def main() -> None:
 
     topic_rows = [
         ("lowstate", "lowstate"),
-        ("mpc_forces", "mpc_forces"),
         ("joy", "joy"),
         ("qdq", "qdq"),
         ("qdq_est", "qdq_est"),
@@ -690,9 +642,6 @@ def main() -> None:
     if show_cmd:
         tab_labels.append("Cmd")
         tab_kinds.append("cmd")
-    if show_grf:
-        tab_labels.append("GRF")
-        tab_kinds.append("grf")
 
     if not tab_labels:
         st.info("All plots are disabled. Enable a plot tab in the sidebar to render charts.")
@@ -792,22 +741,6 @@ def main() -> None:
                         update_plots,
                         "Locomotion Cmd: no data",
                     )
-                elif kind == "grf":
-                    t, series = filter_window(snapshot["t_grf"], snapshot["grf_z"], window_sec)
-                    _render_cached_plot(
-                        "grf_fz",
-                        lambda: _make_series_fig(
-                            t,
-                            series,
-                            ["FL", "FR", "RL", "RR"],
-                            title="GRF Fz (N)",
-                            max_points=max_points,
-                        ),
-                        plot_cache,
-                        update_plots,
-                        "GRF Fz (N): no data",
-                    )
-
     if not use_autorefresh:
         _autorefresh_fallback(refresh_ms)
 

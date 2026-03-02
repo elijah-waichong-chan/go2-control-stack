@@ -2,30 +2,13 @@
 
 import sys
 import signal
-import subprocess
 import atexit
 from pathlib import Path
 
+from telemetry_dashboard import launch_process_manager
 
 def _stop_all():
-    try:
-        subprocess.run(
-            ["ros2", "service", "call", "/launch/mujoco_robot/stop", "std_srvs/srv/Trigger", "{}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=3.0,
-        )
-    except Exception:
-        pass
-    try:
-        subprocess.run(
-            ["ros2", "service", "call", "/launch/control_stack/stop", "std_srvs/srv/Trigger", "{}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=3.0,
-        )
-    except Exception:
-        pass
+    launch_process_manager.stop_all()
 
 
 def main() -> int:
