@@ -1,12 +1,11 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
-
-import os
+from ament_index_python.packages import get_package_share_directory
 
 
 def generate_launch_description():
-    repo = os.path.expanduser('~/go2-convex-mpc')
-    xml_path = os.path.join(repo, 'models', 'MJCF', 'go2', 'scene.xml')
+    mujoco_share = get_package_share_directory('mujoco_robot')
+    xml_path = f"{mujoco_share}/models/MJCF/go2/scene.xml"
 
     return LaunchDescription([
         Node(
