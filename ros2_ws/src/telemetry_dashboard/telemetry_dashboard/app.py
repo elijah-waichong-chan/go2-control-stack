@@ -531,6 +531,13 @@ def main() -> None:
             st.sidebar.info(msg)
         else:
             st.sidebar.warning(msg)
+    qdq_plotter_running = launch_process_manager.is_running("qdq_plotter")
+    if st.sidebar.button("Start Plot Node", key="start_plot_node", disabled=qdq_plotter_running):
+        ok, msg = launch_process_manager.start_run("qdq_plotter", "locomotion_controller", "qdq_plotter")
+        if ok:
+            st.sidebar.info(msg)
+        else:
+            st.sidebar.warning(msg)
     if st.sidebar.button("EMERGENCY STOP", key="emergency_stop", use_container_width=True):
         client = st.session_state.get("svc_emergency_stop")
         if client is None or not client.service_is_ready():
