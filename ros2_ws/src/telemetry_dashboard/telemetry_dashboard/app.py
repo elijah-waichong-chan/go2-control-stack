@@ -112,8 +112,6 @@ class TelemetryNode(Node):
                                  lambda m: self.on_status("inekf", m), status_qos)
         self.create_subscription(Bool, "/status/loco_ctrl/is_running",
                                  lambda m: self.on_status("loco_ctrl", m), status_qos)
-        self.create_subscription(Bool, "/status/mujoco/is_running",
-                                 lambda m: self.on_status("mujoco", m), status_qos)
         self.create_subscription(Bool, "/status/loco_ctrl/safety_stop",
                                  lambda m: self.on_status("safety_stop", m), status_qos)
         self.create_subscription(Bool, "/status/standing_init",
@@ -292,14 +290,12 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
     status_map = snapshot["status"]
 
     labels = [
-        ("mujoco", "MuJoCo"),
         ("inekf", "State Estimator"),
         ("rl_controller", "RL Controller"),
         ("safety_stop", "Safety Stop"),
     ]
 
     status_view = {
-        "mujoco": _get_fresh_status(status_map, "mujoco", now, timeout),
         "inekf": _get_fresh_status(status_map, "inekf", now, timeout),
         "rl_controller": _get_fresh_status(status_map, "loco_ctrl", now, timeout),
         "safety_stop": _get_fresh_status(status_map, "safety_stop", now, timeout),
