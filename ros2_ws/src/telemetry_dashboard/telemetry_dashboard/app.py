@@ -413,7 +413,7 @@ def _render_cached_plot(key: str, build_fig_fn, cache: Dict[str, object], update
     st.image(png, use_container_width=True)
 
 
-def _style_sidebar_buttons(mujoco_running: bool, locomotion_active: bool) -> None:
+def _style_sidebar_buttons(locomotion_active: bool) -> None:
     start_green = "#2ecc71"
     start_border = "#27ae60"
     stop_red = "#e74c3c"
@@ -447,8 +447,6 @@ def _style_sidebar_buttons(mujoco_running: bool, locomotion_active: bool) -> Non
 
     const apply = () => {{
       let ok = true;
-      ok = styleBtn('Start MuJoCo', {str(not mujoco_running).lower()}, '{start_green}', '{start_border}') && ok;
-      ok = styleBtn('Stop MuJoCo', {str(mujoco_running).lower()}, '{stop_red}', '{stop_border}') && ok;
       ok = styleBtn('Start Control Stack', {str(not locomotion_active).lower()}, '{start_green}', '{start_border}') && ok;
       ok = styleBtn('Stop Control Stack', {str(locomotion_active).lower()}, '{stop_red}', '{stop_border}') && ok;
       ok = styleBtn('EMERGENCY STOP', true, '{stop_red}', '{stop_border}') && ok;
@@ -490,13 +488,6 @@ def main() -> None:
 
     st.sidebar.header("Settings")
     status_map = snapshot["status"]
-    mujoco_status_running = _get_fresh_status(
-        status_map,
-        "mujoco",
-        time.monotonic(),
-        float(snapshot["status_timeout_s"]),
-    ) is True
-    mujoco_running = mujoco_status_running or launch_process_manager.is_running("mujoco_robot")
     rl_ctrl_status = _get_fresh_status(
         status_map,
         "loco_ctrl",
@@ -505,19 +496,6 @@ def main() -> None:
     )
     # Consider control stack active when the RL controller status stream is alive.
     locomotion_active = (rl_ctrl_status is not None) or launch_process_manager.is_running("control_stack")
-    col_start, col_stop = st.sidebar.columns(2)
-    if col_start.button("Start MuJoCo", key="start_mujoco", disabled=mujoco_running):
-        ok, msg = launch_process_manager.start_launch("mujoco_robot", "mujoco_robot.launch.py")
-        if ok:
-            st.sidebar.info(msg)
-        else:
-            st.sidebar.warning(msg)
-    if col_stop.button("Stop MuJoCo", key="stop_mujoco", disabled=not mujoco_running):
-        ok, msg = launch_process_manager.stop_launch("mujoco_robot")
-        if ok:
-            st.sidebar.info(msg)
-        else:
-            st.sidebar.warning(msg)
     col_ctrl_start, col_ctrl_stop = st.sidebar.columns(2)
     if col_ctrl_start.button("Start Control Stack", key="start_ctrl", disabled=locomotion_active):
         ok, msg = launch_process_manager.start_launch("control_stack", "control_stack.launch.py")
@@ -538,7 +516,7 @@ def main() -> None:
         else:
             client.call_async(Trigger.Request())
             st.sidebar.error("Emergency stop requested")
-    _style_sidebar_buttons(mujoco_running, locomotion_active)
+    _style_sidebar_buttons(locomotion_active)
 
     st.sidebar.subheader("Plots")
     window_sec = 10.0
