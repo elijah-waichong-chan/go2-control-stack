@@ -35,6 +35,25 @@ def start_launch(name: str, launch_file: str) -> Tuple[bool, str]:
         return True, f"started {launch_file}"
 
 
+def start_run(name: str, package: str, executable: str) -> Tuple[bool, str]:
+    with _LOCK:
+        _cleanup_stale(name)
+        if name in _PROCESSES:
+            return False, f"{name} already running"
+
+        env = os.environ.copy()
+        # Streamlit commonly forces a non-GUI backend; allow the child process
+        # to pick an interactive backend when DISPLAY is available.
+        env.pop("MPLBACKEND", None)
+        proc = subprocess.Popen(
+            ["ros2", "run", package, executable],
+            start_new_session=True,
+            env=env,
+        )
+        _PROCESSES[name] = proc
+        return True, f"started {package}/{executable}"
+
+
 def stop_launch(name: str) -> Tuple[bool, str]:
     with _LOCK:
         _cleanup_stale(name)
@@ -69,5 +88,7 @@ def is_running(name: str) -> bool:
 
 
 def stop_all() -> None:
-    for name in ("control_stack", "mujoco_robot"):
+    with _LOCK:
+        names = list(_PROCESSES.keys())
+    for name in names:
         stop_launch(name)
