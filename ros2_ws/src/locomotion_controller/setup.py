@@ -44,6 +44,7 @@ setup(
         'console_scripts': [
             'stand_up_init = locomotion_controller.standup_init:main',
             'policy_controller = locomotion_controller.policy_controller:main',
+            'wireless_cmd_bridge = locomotion_controller.wireless_cmd_bridge:main',
         ],
     },
 )
