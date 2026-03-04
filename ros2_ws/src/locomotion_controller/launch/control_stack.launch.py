@@ -1,22 +1,30 @@
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, SetEnvironmentVariable # type: ignore
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable # type: ignore
 from launch.launch_description_sources import PythonLaunchDescriptionSource # type: ignore
+from launch.substitutions import LaunchConfiguration # type: ignore
 from launch_ros.actions import Node # type: ignore
 from ament_index_python.packages import get_package_share_directory # type: ignore
 
 
 def generate_launch_description():
+    enable_inekf = LaunchConfiguration("enable_inekf")
     go2_odom_launch = (
         get_package_share_directory('go2_odometry')
         + '/launch/go2_inekf_odometry.launch.py'
     )
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "enable_inekf",
+            default_value="false",
+            description="Launch inekf_odom.py estimator node",
+        ),
         SetEnvironmentVariable(
             'RCUTILS_CONSOLE_OUTPUT_FORMAT',
             '[{severity}] [{name}]: {message}'
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(go2_odom_launch),
+            launch_arguments={"run_inekf": enable_inekf}.items(),
         ),
         Node(
             package='locomotion_controller',
@@ -43,6 +51,24 @@ def generate_launch_description():
             parameters=[{
                 'require_standing_init': True,
                 'control_hz': 50.0,
+            }],
+        ),
+        Node(
+            package='locomotion_controller',
+            executable='wireless_cmd_bridge',
+            name='wireless_cmd_bridge',
+            output='screen',
+            parameters=[{
+                'wireless_topic': '/wirelesscontroller',
+                'locomotion_cmd_topic': '/locomotion_cmd',
+                'publish_hz': 50.0,
+                'cmd_timeout_s': 0.5,
+                'deadzone': 0.05,
+                'scale_x': 1.0,
+                'scale_y': -0.5,
+                'scale_yaw': -1.0,
+                'z_pos': 0.27,
+                'gait_hz': 3.0,
             }],
         ),
     ])
