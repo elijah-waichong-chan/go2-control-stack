@@ -75,6 +75,8 @@ class PolicyControllerNode(Node):
         self.declare_parameter("control_hz", 50.0)
         self.declare_parameter("cmd_timeout_s", 0.5)
         self.declare_parameter("require_standing_init", True)
+        self.declare_parameter("onnx_intra_threads", 1)
+        self.declare_parameter("onnx_inter_threads", 1)
 
         self.policy_dir = Path(str(self.get_parameter("policy_dir").value)).expanduser()
         self.lowstate_topic = str(self.get_parameter("lowstate_topic").value)
@@ -83,6 +85,8 @@ class PolicyControllerNode(Node):
         self.control_hz = float(self.get_parameter("control_hz").value)
         self.cmd_timeout_s = float(self.get_parameter("cmd_timeout_s").value)
         self.require_standing_init = bool(self.get_parameter("require_standing_init").value)
+        self.onnx_intra_threads = int(self.get_parameter("onnx_intra_threads").value)
+        self.onnx_inter_threads = int(self.get_parameter("onnx_inter_threads").value)
 
         self.deploy_cfg = self._load_deploy_cfg(self.policy_dir / "params" / "deploy.yaml")
         self._load_action_cfg()
@@ -96,6 +100,7 @@ class PolicyControllerNode(Node):
         self.standing_ready = not self.require_standing_init
         self.wait_logged = False
         self.ready_sent = False
+        self.motor_state_wait_logged = False
 
         self.session, self.input_name, self.output_name = self._create_onnx_session(
             self.policy_dir / "exported" / "policy.onnx"
@@ -198,8 +203,15 @@ class PolicyControllerNode(Node):
             )
         if not policy_path.exists():
             raise RuntimeError(f"policy.onnx not found: {policy_path}")
-
-        sess = ort.InferenceSession(str(policy_path), providers=["CPUExecutionProvider"])
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = max(1, int(self.onnx_intra_threads))
+        opts.inter_op_num_threads = max(1, int(self.onnx_inter_threads))
+        opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        sess = ort.InferenceSession(
+            str(policy_path),
+            sess_options=opts,
+            providers=["CPUExecutionProvider"],
+        )
         inputs = sess.get_inputs()
         outputs = sess.get_outputs()
         if not inputs or not outputs:
@@ -224,6 +236,11 @@ class PolicyControllerNode(Node):
                 self.wait_logged = True
             return
         if self.last_lowstate is None:
+            return
+        if len(self.last_lowstate.motor_state) <= max(self.joint_ids_map):
+            if not self.motor_state_wait_logged:
+                self.get_logger().warning("policy_controller waiting for full /lowstate motor_state.")
+                self.motor_state_wait_logged = True
             return
 
         obs = self._build_observation(self.last_lowstate)
