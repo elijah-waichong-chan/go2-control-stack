@@ -4,12 +4,10 @@ import os
 import threading
 import time
 import uuid
-import io
 from collections import deque
-from typing import Deque, Dict, List, Tuple
+from typing import Deque, Dict, Tuple
 
 import numpy as np
-import matplotlib.pyplot as plt
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -55,7 +53,6 @@ class TelemetryNode(Node):
         self.cmd_topic = self.declare_parameter("locomotion_cmd_topic", "/locomotion_cmd").value
         self.history_sec = float(self.declare_parameter("history_sec", 20.0).value)
         self.max_samples = int(self.declare_parameter("max_samples", 6000).value)
-        self.max_plot_points = int(self.declare_parameter("max_plot_points", 1000).value)
         self.status_timeout_s = float(self.declare_parameter("status_timeout_s", 3.0).value)
 
         qos = QoSProfile(
@@ -237,7 +234,6 @@ class TelemetryNode(Node):
                 "topic_rate": dict(self._topic_rate),
                 "topic_names": dict(self._topic_names),
                 "status_timeout_s": self.status_timeout_s,
-                "max_plot_points": self.max_plot_points,
             }
 
 
@@ -263,16 +259,6 @@ def get_ros_node() -> TelemetryNode:
     thread.start()
     st.session_state["ros_node"] = node
     return node
-
-
-def _autorefresh_fallback(interval_ms: int) -> None:
-    if interval_ms <= 0:
-        return
-    time.sleep(float(interval_ms) / 1000.0)
-    if hasattr(st, "rerun"):
-        st.rerun()
-    elif hasattr(st, "experimental_rerun"):
-        st.experimental_rerun()
 
 
 def _get_fresh_status(status_map: Dict[str, Tuple[bool, float]], key: str, now: float, timeout: float):
@@ -328,87 +314,6 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
                         st.error(f"{label}: not running")
 
 
-def filter_window(t: List[float], series: List[List[float]], window: float):
-    if not t:
-        return [], [list() for _ in series]
-    t_max = t[-1]
-    t_min = t_max - window
-    idx0 = 0
-    while idx0 < len(t) and t[idx0] < t_min:
-        idx0 += 1
-    t_win = t[idx0:]
-    series_win = [s[idx0:] for s in series]
-    return t_win, series_win
-
-
-def decimate(t: List[float], series: List[List[float]], max_points: int):
-    if not t or max_points <= 0:
-        return t, series
-    n = len(t)
-    if n <= max_points:
-        return t, series
-    step = max(1, int(np.ceil(n / max_points)))
-    t_ds = t[::step]
-    series_ds = [s[::step] for s in series]
-    return t_ds, series_ds
-
-
-def plot_series(title: str, t: List[float], series: List[List[float]], labels: List[str], ylim=None, max_points: int = 1000):
-    fig = _make_series_fig(t, series, labels, title=title, ylim=ylim, max_points=max_points)
-    if fig is None:
-        st.write(f"{title}: no data")
-        return
-    st.pyplot(fig, clear_figure=True)
-
-
-def _make_series_fig(
-    t: List[float],
-    series: List[List[float]],
-    labels: List[str],
-    title: str,
-    ylim=None,
-    max_points: int = 1000,
-):
-    if not t or not series:
-        return None
-    n = min(len(t), *(len(s) for s in series))
-    if n <= 0:
-        return None
-    t = [float(x) for x in t[:n]]
-    fig, ax = plt.subplots()
-    t, series = decimate(t, [list(s[:n]) for s in series], max_points)
-    for i, label in enumerate(labels):
-        y = [float(x) for x in series[i]]
-        ax.plot(t, y, label=label)
-    ax.set_title(title)
-    ax.set_xlabel("time (s)")
-    ax.legend(loc="upper right")
-    if ylim is not None:
-        ax.set_ylim(ylim[0], ylim[1])
-    return fig
-
-
-def _fig_to_png(fig) -> bytes:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    return buf.getvalue()
-
-
-def _render_cached_plot(key: str, build_fig_fn, cache: Dict[str, object], update: bool, empty_message: str) -> None:
-    if not update and key in cache:
-        st.image(cache[key], use_container_width=True)
-        return
-    fig = build_fig_fn()
-    if fig is None:
-        cache.pop(key, None)
-        st.write(empty_message)
-        return
-    png = _fig_to_png(fig)
-    cache[key] = png
-    st.image(png, use_container_width=True)
-
-
 def _style_sidebar_buttons(locomotion_active: bool) -> None:
     start_green = "#2ecc71"
     start_border = "#27ae60"
@@ -457,19 +362,6 @@ def _style_sidebar_buttons(locomotion_active: bool) -> None:
     components.html(js, height=0)
 
 
-def _disabled_radio_option(label: str, container=None) -> None:
-    target = container or st
-    target.markdown(
-        f"""
-        <div style="opacity:0.45; display:flex; align-items:center; margin-left:0.4rem;">
-            <input type="radio" disabled style="margin-right:0.35rem;">
-            <span>{label}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def main() -> None:
     st.set_page_config(layout="wide", page_title="Go2 Telemetry")
     st.title("Go2 Telemetry Dashboard")
@@ -514,47 +406,6 @@ def main() -> None:
             st.sidebar.error("Emergency stop requested")
     _style_sidebar_buttons(locomotion_active)
 
-    st.sidebar.subheader("Plots")
-    window_sec = 10.0
-    refresh_ms = 50
-    plot_refresh_s = 0.5
-    use_autorefresh = hasattr(st, "autorefresh")
-    if use_autorefresh:
-        st.autorefresh(interval=refresh_ms, key="autorefresh")
-    qdq_ok = _get_fresh_status(status_map, "qdq", time.monotonic(), float(snapshot["status_timeout_s"])) is True
-    qdq_est_ok = _get_fresh_status(status_map, "qdq_est", time.monotonic(), float(snapshot["status_timeout_s"])) is True
-    disable_pos = not (qdq_ok or qdq_est_ok)
-    if disable_pos:
-        st.session_state["show_pos"] = False
-    show_pos = st.sidebar.checkbox("Show Position/Velocity", value=False, key="show_pos", disabled=disable_pos)
-    data_mode = "True State (Simulator)"
-    if show_pos:
-        radio_key = "state_source"
-        if not qdq_est_ok:
-            st.session_state[radio_key] = "True State (Simulator)"
-        if qdq_est_ok:
-            data_mode = st.sidebar.radio(
-                "State Source",
-                options=["True State (Simulator)", "Estimator (InEKF)"],
-                index=0,
-                horizontal=False,
-                key=radio_key,
-            )
-        else:
-            data_mode = st.sidebar.radio(
-                "State Source",
-                options=["True State (Simulator)"],
-                index=0,
-                horizontal=False,
-                key=radio_key,
-            )
-            _disabled_radio_option("Estimator (InEKF)", st.sidebar)
-        if not qdq_est_ok:
-            data_mode = "True State (Simulator)"
-    show_rpy = st.sidebar.checkbox("Show RPY", value=False)
-    show_cmd = st.sidebar.checkbox("Show Cmd", value=False)
-    max_points = int(snapshot.get("max_plot_points", 1000))
-
     st.subheader("Modules")
     render_status(snapshot, snapshot["status_timeout_s"])
     st.subheader("Topics")
@@ -569,8 +420,6 @@ def main() -> None:
 
     topic_rows = [
         ("lowstate", "lowstate"),
-        ("joy", "joy"),
-        ("qdq", "qdq"),
         ("qdq_est", "qdq_est"),
     ]
     badges = []
@@ -592,131 +441,6 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     st.markdown(f"<div class=\"topic-wrap\">{''.join(badges)}</div>", unsafe_allow_html=True)
-    st.subheader("Plots")
-
-    cache_version = st.session_state.get("plot_cache_version", 0)
-    if cache_version != 5:
-        st.session_state["plot_cache"] = {}
-        st.session_state["plot_cache_version"] = 5
-    plot_cache = st.session_state.setdefault("plot_cache", {})
-    now = time.monotonic()
-    last_plot_update = float(st.session_state.get("last_plot_update", 0.0))
-    update_plots = (now - last_plot_update) >= plot_refresh_s or not plot_cache
-    if update_plots:
-        st.session_state["last_plot_update"] = now
-
-    tab_labels = []
-    tab_kinds = []
-    if show_pos:
-        tab_labels.append("Position/Velocity")
-        tab_kinds.append("pos")
-    if show_rpy:
-        tab_labels.append("RPY")
-        tab_kinds.append("rpy")
-    if show_cmd:
-        tab_labels.append("Cmd")
-        tab_kinds.append("cmd")
-
-    if not tab_labels:
-        st.info("All plots are disabled. Enable a plot tab in the sidebar to render charts.")
-    else:
-        tabs = st.tabs(tab_labels)
-        for idx, kind in enumerate(tab_kinds):
-            with tabs[idx]:
-                if kind == "pos":
-                    t_real, real = filter_window(snapshot["t_q"], snapshot["q_xyz"], window_sec)
-                    t_est, est = filter_window(snapshot["t_q_est"], snapshot["q_xyz_est"], window_sec)
-                    if data_mode == "True State (Simulator)":
-                        t_plot, series_plot = decimate([float(x) for x in t_real], real, max_points) if t_real else ([], [])
-                        labels = ["q_x", "q_y", "q_z"]
-                        cache_key = "pos_position_true"
-                    else:
-                        t_plot, series_plot = decimate([float(x) for x in t_est], est, max_points) if t_est else ([], [])
-                        labels = ["qdq_est_x", "qdq_est_y", "qdq_est_z"]
-                        cache_key = "pos_position_est"
-
-                    if update_plots or cache_key not in plot_cache:
-                        if not t_plot or not series_plot:
-                            plot_cache.pop(cache_key, None)
-                        else:
-                            series_plot = [[float(v) for v in s] for s in series_plot]
-                            plot_cache[cache_key] = {labels[i]: series_plot[i] for i in range(len(labels))}
-
-                    data = plot_cache.get(cache_key)
-                    if data is None:
-                        st.write("Position (m): no data")
-                    else:
-                        try:
-                            clean = {k: [float(x) for x in v] for k, v in data.items()}
-                        except Exception:
-                            plot_cache.pop(cache_key, None)
-                            st.write("Position (m): no data")
-                            continue
-                        st.markdown("**Position (m)**")
-                        # Streamlit line_chart has issues with some list inputs in this environment.
-                        # Use the cached matplotlib path to keep it stable.
-                        fig, ax = plt.subplots()
-                        for label, series in clean.items():
-                            ax.plot(series, label=label)
-                        ax.set_title("Position (m)")
-                        ax.set_xlabel("sample")
-                        ax.legend(loc="upper right")
-                        st.pyplot(fig, clear_figure=True)
-                elif kind == "rpy":
-                    t, series = filter_window(snapshot["t_q"], snapshot["rpy"], window_sec)
-                    if t:
-                        roll_deg = np.array(series[0]) * 180.0 / np.pi
-                        pitch_deg = np.array(series[1]) * 180.0 / np.pi
-                        yaw_deg = np.array(series[2]) * 180.0 / np.pi
-                        _render_cached_plot(
-                            "rpy_roll_pitch",
-                            lambda: _make_series_fig(
-                                t,
-                                [list(roll_deg), list(pitch_deg)],
-                                ["roll", "pitch"],
-                                title="Roll/Pitch (deg)",
-                                ylim=(-5.0, 5.0),
-                                max_points=max_points,
-                            ),
-                            plot_cache,
-                            update_plots,
-                            "Roll/Pitch (deg): no data",
-                        )
-                        _render_cached_plot(
-                            "rpy_yaw",
-                            lambda: _make_series_fig(
-                                t,
-                                [list(yaw_deg)],
-                                ["yaw"],
-                                title="Yaw (deg)",
-                                ylim=(-180.0, 180.0),
-                                max_points=max_points,
-                            ),
-                            plot_cache,
-                            update_plots,
-                            "Yaw (deg): no data",
-                        )
-                    else:
-                        plot_cache.pop("rpy_roll_pitch", None)
-                        plot_cache.pop("rpy_yaw", None)
-                        st.write("RPY: no data")
-                elif kind == "cmd":
-                    t, series = filter_window(snapshot["t_cmd"], snapshot["cmd"], window_sec)
-                    _render_cached_plot(
-                        "cmd_locomotion",
-                        lambda: _make_series_fig(
-                            t,
-                            series,
-                            ["x_vel", "y_vel", "z_pos", "yaw_rate", "gait_hz"],
-                            title="Locomotion Cmd",
-                            max_points=max_points,
-                        ),
-                        plot_cache,
-                        update_plots,
-                        "Locomotion Cmd: no data",
-                    )
-    if not use_autorefresh:
-        _autorefresh_fallback(refresh_ms)
 
 
 if __name__ == "__main__":
