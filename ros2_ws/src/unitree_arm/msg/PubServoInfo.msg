@@ -1,0 +1,7 @@
+float32 servo0_data
+float32 servo1_data
+float32 servo2_data
+float32 servo3_data
+float32 servo4_data
+float32 servo5_data
+float32 servo6_data
