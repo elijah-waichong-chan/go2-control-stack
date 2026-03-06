@@ -13,6 +13,7 @@ __pycache__/
 /ros2_ws/build/
 /ros2_ws/install/
 /ros2_ws/log/
+rosbag2_*/
 
 # External deps / local builds
 /ros2_ws/casadi/
