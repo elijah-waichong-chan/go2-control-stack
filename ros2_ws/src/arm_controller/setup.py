@@ -20,6 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'arm_feedback_parser = arm_controller.arm_feedback_parser:main',
         ],
     },
 )
