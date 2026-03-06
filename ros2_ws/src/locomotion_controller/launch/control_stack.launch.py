@@ -44,12 +44,18 @@ def generate_launch_description():
             }],
         ),
         Node(
+            package='arm_controller',
+            executable='arm_feedback_parser',
+            name='arm_feedback_parser',
+            output='screen',
+        ),
+        Node(
             package='locomotion_controller',
             executable='policy_controller',
             name='policy_controller',
             output='screen',
             parameters=[{
-                'require_standing_init': True,
+                'require_standing_init': False,
                 'control_hz': 50.0,
             }],
         ),
@@ -61,6 +67,8 @@ def generate_launch_description():
             parameters=[{
                 'wireless_topic': '/wirelesscontroller',
                 'locomotion_cmd_topic': '/locomotion_cmd',
+                'push_event_topic': '/data/push_event',
+                'push_event_hz': 10.0,
                 'publish_hz': 50.0,
                 'cmd_timeout_s': 0.5,
                 'deadzone': 0.05,
