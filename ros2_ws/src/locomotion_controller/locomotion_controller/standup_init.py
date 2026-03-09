@@ -12,7 +12,7 @@ from rclpy.qos import (
     QoSProfile,
     QoSReliabilityPolicy,
 )
-from std_msgs.msg import Bool
+from std_msgs.msg import Int32
 from unitree_go.msg import LowCmd, LowState
 
 
@@ -156,6 +156,10 @@ def get_crc(msg: LowCmd) -> int:
 
 
 class StandUpInitNode(Node):
+    STATUS_RUNNING = 1
+    STATUS_WAITING_FOR_LOWSTATE = 2
+    STATUS_COMPLETE = 3
+
     def __init__(self) -> None:
         super().__init__("stand_up_init")
 
@@ -166,6 +170,7 @@ class StandUpInitNode(Node):
         self.declare_parameter("ramp_time_s", 2.0)
         self.declare_parameter("start_delay_s", 0.5)
         self.declare_parameter("command_hz", 500.0)
+        self.declare_parameter("status_hz", 10.0)
         self.declare_parameter("exit_after_standing_s", 2.0)
         self.declare_parameter("crouch_pos", DEFAULT_CROUCH_POS)
         self.declare_parameter("target_pos", DEFAULT_TARGET_POS)
@@ -177,6 +182,7 @@ class StandUpInitNode(Node):
         self.ramp_time_s = max(0.01, float(self.get_parameter("ramp_time_s").value))
         self.start_delay_s = max(0.0, float(self.get_parameter("start_delay_s").value))
         self.command_hz = max(1.0, float(self.get_parameter("command_hz").value))
+        self.status_hz = max(1.0, float(self.get_parameter("status_hz").value))
         self.exit_after_standing_s = max(
             0.0, float(self.get_parameter("exit_after_standing_s").value)
         )
@@ -211,12 +217,10 @@ class StandUpInitNode(Node):
         self.lowstate_sub = self.create_subscription(
             LowState, "/lowstate", self.on_lowstate, qos
         )
-        self.status_pub = self.create_publisher(Bool, "/status/standing_init", status_qos)
+        self.status_pub = self.create_publisher(Int32, "/status/standing_init", status_qos)
         self.ctrl_status_sub = self.create_subscription(
-            Bool, "/status/loco_ctrl/is_running", self.on_ctrl_status, status_qos
+            Int32, "/status/loco_ctrl", self.on_ctrl_status, status_qos
         )
-
-        self.status_pub.publish(Bool(data=False))
 
         self.last_state: Optional[LowState] = None
         self.have_state = False
@@ -224,12 +228,20 @@ class StandUpInitNode(Node):
         self.start_time = self.get_clock().now()
         self.start_pos = [0.0] * 12
         self.status_sent = False
+        self.status_code = self.STATUS_WAITING_FOR_LOWSTATE
         self.ctrl_running = False
         self.standing_done_time_ns: Optional[int] = None
         self.shutdown_requested = False
 
         self.timer = self.create_timer(1.0 / self.command_hz, self.on_timer)
+        self.status_timer = self.create_timer(1.0 / self.status_hz, self.on_status_timer)
         self.get_logger().info("stand_up_init running")
+
+    def _set_status(self, status_code: int) -> None:
+        self.status_code = int(status_code)
+
+    def on_status_timer(self) -> None:
+        self.status_pub.publish(Int32(data=int(self.status_code)))
 
     def _request_shutdown(self, reason: str) -> None:
         if self.shutdown_requested:
@@ -249,6 +261,7 @@ class StandUpInitNode(Node):
 
     def on_timer(self) -> None:
         if not self.have_state or self.last_state is None:
+            self._set_status(self.STATUS_WAITING_FOR_LOWSTATE)
             return
 
         if not self.started:
@@ -256,6 +269,10 @@ class StandUpInitNode(Node):
                 self.start_pos[i] = float(self.last_state.motor_state[i].q)
             self.start_time = self.get_clock().now()
             self.started = True
+        if self.status_sent:
+            self._set_status(self.STATUS_COMPLETE)
+        else:
+            self._set_status(self.STATUS_RUNNING)
 
         t = (self.get_clock().now() - self.start_time).nanoseconds * 1e-9 - self.start_delay_s
         if t < 0.0:
@@ -266,7 +283,7 @@ class StandUpInitNode(Node):
         t_stand_end = t_hold_end + self.ramp_time_s
 
         if t >= t_stand_end and not self.status_sent:
-            self.status_pub.publish(Bool(data=True))
+            self._set_status(self.STATUS_COMPLETE)
             self.status_sent = True
             self.standing_done_time_ns = self.get_clock().now().nanoseconds
 
@@ -318,8 +335,8 @@ class StandUpInitNode(Node):
         cmd.crc = get_crc(cmd)
         self.lowcmd_pub.publish(cmd)
 
-    def on_ctrl_status(self, msg: Bool) -> None:
-        if (not msg.data) or self.ctrl_running:
+    def on_ctrl_status(self, msg: Int32) -> None:
+        if int(msg.data) != 1 or self.ctrl_running:
             return
         self.ctrl_running = True
         self._request_shutdown("locomotion_controller is running; stopping stand_up_init.")

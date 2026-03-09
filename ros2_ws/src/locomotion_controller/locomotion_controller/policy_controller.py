@@ -18,7 +18,7 @@ from rclpy.qos import (
     QoSProfile,
     QoSReliabilityPolicy,
 )
-from std_msgs.msg import Bool
+from std_msgs.msg import Int32
 from unitree_go.msg import LowCmd, LowState
 
 from locomotion_controller.standup_init import (
@@ -62,6 +62,11 @@ def _zeros_for_shape(shape: list[Any]) -> np.ndarray:
 
 
 class PolicyControllerNode(Node):
+    STATUS_IDLE = 0
+    STATUS_RUNNING = 1
+    STATUS_WAITING_FOR_LOWSTATE = 2
+    STATUS_WAITING_FOR_STANDING_INIT = 3
+
     def __init__(self) -> None:
         super().__init__("policy_controller")
 
@@ -73,6 +78,7 @@ class PolicyControllerNode(Node):
         self.declare_parameter("locomotion_cmd_topic", "/locomotion_cmd")
         self.declare_parameter("lowcmd_topic", "/lowcmd")
         self.declare_parameter("control_hz", 50.0)
+        self.declare_parameter("status_hz", 10.0)
         self.declare_parameter("cmd_timeout_s", 0.5)
         self.declare_parameter("require_standing_init", True)
         self.declare_parameter("onnx_intra_threads", 1)
@@ -83,6 +89,7 @@ class PolicyControllerNode(Node):
         self.locomotion_cmd_topic = str(self.get_parameter("locomotion_cmd_topic").value)
         self.lowcmd_topic = str(self.get_parameter("lowcmd_topic").value)
         self.control_hz = float(self.get_parameter("control_hz").value)
+        self.status_hz = float(self.get_parameter("status_hz").value)
         self.cmd_timeout_s = float(self.get_parameter("cmd_timeout_s").value)
         self.require_standing_init = bool(self.get_parameter("require_standing_init").value)
         self.onnx_intra_threads = int(self.get_parameter("onnx_intra_threads").value)
@@ -99,8 +106,11 @@ class PolicyControllerNode(Node):
         self.last_cmd_time_ns: int | None = None
         self.standing_ready = not self.require_standing_init
         self.wait_logged = False
+        self.lowstate_wait_logged = False
         self.ready_sent = False
+        self.running_logged = False
         self.motor_state_wait_logged = False
+        self.status_code = self.STATUS_IDLE
 
         self.session, self.input_name, self.output_name = self._create_onnx_session(
             self.policy_dir / "exported" / "policy.onnx"
@@ -123,8 +133,8 @@ class PolicyControllerNode(Node):
         )
 
         self.pub_lowcmd = self.create_publisher(LowCmd, self.lowcmd_topic, sensor_qos)
-        self.pub_status = self.create_publisher(Bool, "/status/loco_ctrl/is_running", status_qos)
-        self.pub_status.publish(Bool(data=False))
+        self.pub_status = self.create_publisher(Int32, "/status/loco_ctrl", status_qos)
+        self._set_status(self.STATUS_IDLE)
 
         self.sub_lowstate = self.create_subscription(
             LowState, self.lowstate_topic, self.on_lowstate, sensor_qos
@@ -133,12 +143,18 @@ class PolicyControllerNode(Node):
             LocomotionCmd, self.locomotion_cmd_topic, self.on_locomotion_cmd, sensor_qos
         )
         self.sub_standing = self.create_subscription(
-            Bool, "/status/standing_init", self.on_standing_status, status_qos
+            Int32, "/status/standing_init", self.on_standing_status, status_qos
         )
 
         period = 1.0 / max(self.control_hz, 1.0)
         self.timer = self.create_timer(period, self.on_timer)
-        self.get_logger().info("policy_controller running")
+        self.status_timer = self.create_timer(1.0 / max(self.status_hz, 1.0), self.on_status_timer)
+
+    def _set_status(self, status_code: int) -> None:
+        self.status_code = status_code
+
+    def on_status_timer(self) -> None:
+        self.pub_status.publish(Int32(data=int(self.status_code)))
 
     def _load_deploy_cfg(self, path: Path) -> dict[str, Any]:
         if not path.exists():
@@ -225,22 +241,28 @@ class PolicyControllerNode(Node):
         self.last_locomotion_cmd = msg
         self.last_cmd_time_ns = self.get_clock().now().nanoseconds
 
-    def on_standing_status(self, msg: Bool) -> None:
+    def on_standing_status(self, msg: Int32) -> None:
         if self.require_standing_init:
-            self.standing_ready = bool(msg.data)
+            self.standing_ready = int(msg.data) == 3
 
     def on_timer(self) -> None:
         if self.require_standing_init and not self.standing_ready:
             if not self.wait_logged:
                 self.get_logger().info("policy_controller waiting for /status/standing_init...")
                 self.wait_logged = True
+            self._set_status(self.STATUS_WAITING_FOR_STANDING_INIT)
             return
         if self.last_lowstate is None:
+            if not self.lowstate_wait_logged:
+                self.get_logger().info("policy_controller waiting for /lowstate...")
+                self.lowstate_wait_logged = True
+            self._set_status(self.STATUS_WAITING_FOR_LOWSTATE)
             return
         if len(self.last_lowstate.motor_state) <= max(self.joint_ids_map):
             if not self.motor_state_wait_logged:
                 self.get_logger().warning("policy_controller waiting for full /lowstate motor_state.")
                 self.motor_state_wait_logged = True
+            self._set_status(self.STATUS_WAITING_FOR_LOWSTATE)
             return
 
         obs = self._build_observation(self.last_lowstate)
@@ -251,7 +273,10 @@ class PolicyControllerNode(Node):
 
         self.last_raw_action = raw_action
         if not self.ready_sent:
-            self.pub_status.publish(Bool(data=True))
+            if not self.running_logged:
+                self.get_logger().info("policy_controller running")
+                self.running_logged = True
+            self._set_status(self.STATUS_RUNNING)
             self.ready_sent = True
 
     def _compute_term(self, name: str, lowstate: LowState) -> np.ndarray:

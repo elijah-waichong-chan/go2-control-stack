@@ -9,6 +9,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 
 from go2_msgs.msg import ArmAngles
+from std_msgs.msg import Int32
 from unitree_arm.msg import ArmString
 
 
@@ -40,14 +41,19 @@ def _to_float(value: Any, default: float = 0.0) -> float:
 
 
 class ArmFeedbackParser(Node):
+    STATUS_PUBLISHING = 1
+    STATUS_WAITING_FOR_FEEDBACK = 2
+
     def __init__(self) -> None:
         super().__init__("arm_feedback_parser")
 
         self.declare_parameter("feedback_topic", "/arm_Feedback")
         self.declare_parameter("arm_angles_topic", "/arm_angles")
+        self.declare_parameter("status_hz", 10.0)
 
         feedback_topic = str(self.get_parameter("feedback_topic").value)
         arm_angles_topic = str(self.get_parameter("arm_angles_topic").value)
+        status_hz = max(1.0, float(self.get_parameter("status_hz").value))
 
         qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -55,12 +61,27 @@ class ArmFeedbackParser(Node):
             reliability=QoSReliabilityPolicy.RELIABLE,
             durability=QoSDurabilityPolicy.VOLATILE,
         )
+        status_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
 
         self.sub_feedback = self.create_subscription(
             ArmString, feedback_topic, self.on_feedback, qos
         )
         self.pub_angles = self.create_publisher(ArmAngles, arm_angles_topic, qos)
+        self.pub_status = self.create_publisher(Int32, "/status/arm_parser", status_qos)
+        self.status_code = self.STATUS_WAITING_FOR_FEEDBACK
+        self.status_timer = self.create_timer(1.0 / status_hz, self.on_status_timer)
         self.get_logger().info(f"arm_feedback_parser running: {feedback_topic} -> {arm_angles_topic}")
+
+    def _set_status(self, status_code: int) -> None:
+        self.status_code = int(status_code)
+
+    def on_status_timer(self) -> None:
+        self.pub_status.publish(Int32(data=int(self.status_code)))
 
     def on_feedback(self, msg: ArmString) -> None:
         parsed = self._parse_payload(msg.data)
@@ -81,6 +102,7 @@ class ArmFeedbackParser(Node):
         out.funcode = funcode & 0xFF
         out.angle_deg = self._extract_angles(parsed)
         self.pub_angles.publish(out)
+        self._set_status(self.STATUS_PUBLISHING)
 
     def _parse_payload(self, text: str) -> Optional[Dict[str, Any]]:
         raw = text.strip()

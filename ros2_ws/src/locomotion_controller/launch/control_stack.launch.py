@@ -1,5 +1,6 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable # type: ignore
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, SetEnvironmentVariable # type: ignore
+from launch.conditions import IfCondition, UnlessCondition # type: ignore
 from launch.launch_description_sources import PythonLaunchDescriptionSource # type: ignore
 from launch.substitutions import LaunchConfiguration # type: ignore
 from launch_ros.actions import Node # type: ignore
@@ -8,6 +9,7 @@ from ament_index_python.packages import get_package_share_directory # type: igno
 
 def generate_launch_description():
     enable_inekf = LaunchConfiguration("enable_inekf")
+    require_standing_init = LaunchConfiguration("require_standing_init")
     go2_odom_launch = (
         get_package_share_directory('go2_odometry')
         + '/launch/go2_inekf_odometry.launch.py'
@@ -17,6 +19,11 @@ def generate_launch_description():
             "enable_inekf",
             default_value="true",
             description="Launch inekf_odom.py estimator node",
+        ),
+        DeclareLaunchArgument(
+            "require_standing_init",
+            default_value="true",
+            description="Run stand_up_init and require its ready status before locomotion starts",
         ),
         SetEnvironmentVariable(
             'RCUTILS_CONSOLE_OUTPUT_FORMAT',
@@ -31,6 +38,11 @@ def generate_launch_description():
             executable='stand_up_init',
             name='stand_up_init',
             output='screen',
+            condition=IfCondition(require_standing_init),
+        ),
+        LogInfo(
+            msg='stand_up_init skipped',
+            condition=UnlessCondition(require_standing_init),
         ),
         Node(
             package='estimator_bridge',
@@ -55,7 +67,7 @@ def generate_launch_description():
             name='policy_controller',
             output='screen',
             parameters=[{
-                'require_standing_init': False,
+                'require_standing_init': require_standing_init,
                 'control_hz': 50.0,
             }],
         ),
@@ -72,7 +84,7 @@ def generate_launch_description():
                 'publish_hz': 50.0,
                 'cmd_timeout_s': 0.5,
                 'deadzone': 0.05,
-                'scale_x': 1.0,
+                'scale_x': 0.5,
                 'scale_y': -0.5,
                 'scale_yaw': -1.0,
                 'z_pos': 0.27,
