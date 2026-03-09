@@ -68,3 +68,21 @@ If already cloned:
 ```bash
 git submodule update --init --recursive
 ```
+
+# =============================================
+
+```bash
+docker build -t go2-ros2-control .  # Builds image and names it
+docker run -d --mount type=bind,src="$(pwd)",dst=/home/go2-control-stack -p 8501:8501 go2-ros2-control sleep infinity  # Runs image in background
+
+docker run -d \
+  --mount type=bind,src="$(pwd)",dst=/home/go2-control-stack \
+  -p 8501:8501 \
+  -p 8765:8765 \
+  go2-ros2-control sleep infinity
+
+docker exec -it <container_id> bash  # Get container ID from `docker ps`
+
+docker image ls  # To see all built/pulled images
+docker ps  # To see all running containers
+```
