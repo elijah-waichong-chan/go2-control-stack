@@ -17,7 +17,10 @@ from rclpy.qos import (
 )
 from std_msgs.msg import Int32
 
-from direction_intent_estimator.model_runtime import SlidingWindowIntentModel
+from direction_intent_estimator.model_runtime import (
+    RunningStatusHeartbeat,
+    SlidingWindowIntentModel,
+)
 
 
 class LeftRightIntentEstimatorNode(Node):
@@ -34,17 +37,26 @@ class LeftRightIntentEstimatorNode(Node):
         self.declare_parameter("output_topic", "/direction_intent/left_right")
         self.declare_parameter("onnx_intra_threads", 1)
         self.declare_parameter("onnx_inter_threads", 1)
+        self.declare_parameter("status_topic", "/status/intent_estimator/is_running")
+        self.declare_parameter("status_hz", 1.0)
 
         self.model_dir = Path(str(self.get_parameter("model_dir").value)).expanduser()
         self.arm_angles_topic = str(self.get_parameter("arm_angles_topic").value)
         self.output_topic = str(self.get_parameter("output_topic").value)
         self.onnx_intra_threads = int(self.get_parameter("onnx_intra_threads").value)
         self.onnx_inter_threads = int(self.get_parameter("onnx_inter_threads").value)
+        self.status_topic = str(self.get_parameter("status_topic").value)
+        self.status_hz = float(self.get_parameter("status_hz").value)
         self.model = SlidingWindowIntentModel(
             logger=self.get_logger(),
             model_dir=self.model_dir,
             onnx_intra_threads=self.onnx_intra_threads,
             onnx_inter_threads=self.onnx_inter_threads,
+        )
+        self.status_heartbeat = RunningStatusHeartbeat(
+            node=self,
+            topic=self.status_topic,
+            hz=self.status_hz,
         )
 
         qos = QoSProfile(
@@ -62,6 +74,7 @@ class LeftRightIntentEstimatorNode(Node):
         self.get_logger().info(
             "left_right_intent_estimator ready: "
             f"{self.arm_angles_topic} -> {self.output_topic}, "
+            f"status={self.status_topic}, "
             f"model={self.model.metadata.model_path}, "
             f"input={self.model.input_name}[batch,"
             f"{self.model.metadata.num_features},"
