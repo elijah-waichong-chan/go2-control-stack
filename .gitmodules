@@ -9,4 +9,4 @@
 	url = https://github.com/inria-paris-robotics-lab/unitree_description.git
 [submodule "ros2_ws/src/inekf"]
 	path = ros2_ws/src/inekf
-	url = https://github.com/inria-paris-robotics-lab/invariant-ekf
+	url = https://github.com/elijah-waichong-chan/invariant-ekf.git
