@@ -1,0 +1,30 @@
+model:
+  format: onnx
+  path: ../exported/policy.onnx
+  input_name: input
+  output_name: logits
+  opset_version: 18
+  input_layout: NCT
+  dynamic_batch: true
+  num_features: 7
+  num_timesteps: 60
+features:
+  selected:
+  - name: arm_angles
+    source_start: 31
+    source_end: 38
+    width: 7
+labels:
+  raw_label_set: [0, 3, 4]
+  label_to_index:
+    0: 0
+    3: 1
+    4: 2
+  index_to_label:
+    0: 0
+    1: 3
+    2: 4
+preprocessing:
+  normalize: true
+  x_mean: [0.3797907829284668, -40.18762969970703, 30.288972854614258, 0.056320060044527054, 9.884546279907227, 89.93083953857422, -0.37767356634140015]
+  x_std: [0.04012773185968399, 0.3142089545726776, 0.13003048300743103, 0.36767518520355225, 0.3795943260192871, 0.43036338686943054, 0.06908529251813889]
