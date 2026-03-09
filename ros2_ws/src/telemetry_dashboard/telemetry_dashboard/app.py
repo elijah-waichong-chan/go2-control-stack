@@ -54,6 +54,7 @@ class TelemetryNode(Node):
         self.history_sec = float(self.declare_parameter("history_sec", 20.0).value)
         self.max_samples = int(self.declare_parameter("max_samples", 6000).value)
         self.status_timeout_s = float(self.declare_parameter("status_timeout_s", 3.0).value)
+        self.graph_poll_hz = float(self.declare_parameter("graph_poll_hz", 1.0).value)
 
         qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -67,6 +68,7 @@ class TelemetryNode(Node):
         )
 
         self._lock = threading.Lock()
+        self._shutdown_event = threading.Event()
         self._t0_q = None
         self._t0_cmd = None
 
@@ -113,8 +115,12 @@ class TelemetryNode(Node):
                                  lambda m: self.on_status("safety_stop", m), status_qos)
         self.create_subscription(Bool, "/status/standing_init",
                                  lambda m: self.on_status("standing_init", m), status_qos)
-
-        self.topic_timer = self.create_timer(1.0, self._update_topic_availability)
+        self._graph_thread = threading.Thread(
+            target=self._graph_monitor_loop,
+            name=f"{node_name}_graph_monitor",
+            daemon=True,
+        )
+        self._graph_thread.start()
 
     def on_status(self, name: str, msg: Bool) -> None:
         with self._lock:
@@ -209,6 +215,11 @@ class TelemetryNode(Node):
                 for _key, name in self._topic_names.items():
                     self._topic_available[name] = False
 
+    def _graph_monitor_loop(self) -> None:
+        poll_period_s = 1.0 / max(self.graph_poll_hz, 0.1)
+        while not self._shutdown_event.wait(poll_period_s):
+            self._update_topic_availability()
+
     def snapshot(self) -> Dict[str, object]:
         with self._lock:
             return {
@@ -236,6 +247,12 @@ class TelemetryNode(Node):
                 "status_timeout_s": self.status_timeout_s,
             }
 
+    def destroy_node(self) -> bool:
+        self._shutdown_event.set()
+        if self._graph_thread.is_alive():
+            self._graph_thread.join(timeout=1.0)
+        return super().destroy_node()
+
 
 def get_ros_node() -> TelemetryNode:
     if "ros_node" in st.session_state:
@@ -257,6 +274,8 @@ def get_ros_node() -> TelemetryNode:
     executor.add_node(node)
     thread = threading.Thread(target=executor.spin, daemon=True)
     thread.start()
+    st.session_state["ros_executor"] = executor
+    st.session_state["ros_spin_thread"] = thread
     st.session_state["ros_node"] = node
     return node
 
@@ -367,11 +386,6 @@ def main() -> None:
     st.title("Go2 Telemetry Dashboard")
 
     node = get_ros_node()
-    # Ensure callbacks are processed even if the background executor stalls.
-    try:
-        rclpy.spin_once(node, timeout_sec=0.0)
-    except Exception:
-        pass
     snapshot = node.snapshot()
 
     st.sidebar.header("Settings")
