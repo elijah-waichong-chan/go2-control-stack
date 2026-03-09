@@ -1,20 +1,26 @@
 FROM ubuntu:22.04
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=Etc/UTC
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Etc/UTC
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ >/etc/timezone
 
 EXPOSE 8501 8765
 
-RUN apt update
-RUN apt install -y software-properties-common tzdata
-RUN add-apt-repository universe
-RUN apt update
+RUN apt update && apt install -y \
+    software-properties-common \
+    tzdata && \
+    add-apt-repository universe && \
+    apt update && apt install -y \
+    curl \
+    git \
+    locales \
+    python3 \
+    python3-empy \
+    python3-pip \
+    software-properties-common
 
-RUN apt install -y python3.11 pip locales software-properties-common curl
-
-RUN locale-gen en_US en_US.UTF-8
-RUN update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+RUN locale-gen en_US en_US.UTF-8 && \
+    update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
 ENV LANG=en_US.UTF-8
 
 RUN set -eux; \
@@ -23,13 +29,23 @@ RUN set -eux; \
     curl -fL -o /tmp/ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.${UBUNTU_CODENAME}_all.deb"; \
     dpkg -i /tmp/ros2-apt-source.deb
 
-RUN apt update
-RUN apt upgrade -y
-RUN apt install -y ros-humble-ros-base ros-dev-tools 
-RUN apt install -y ros-humble-rosidl-generator-dds-idl libboost-test-dev
-RUN apt install -y ros-humble-pinocchio
-RUN apt install -y ros-humble-foxglove-bridge
+RUN apt update && apt upgrade -y && apt install -y \
+    libasio-dev \
+    libboost-test-dev \
+    libwebsocketpp-dev \
+    nlohmann-json3-dev \
+    ros-dev-tools \
+    ros-humble-foxglove-bridge \
+    ros-humble-pinocchio \
+    ros-humble-rmw-cyclonedds-cpp \
+    ros-humble-ros-base \
+    ros-humble-rosidl-generator-dds-idl
 
-RUN pip install streamlit eigenpy onnxruntime
-RUN pip install "numpy<2"
-ENV CMAKE_PREFIX_PATH=/usr/local/lib/python3.10/dist-packages/cmeel.prefix
+RUN git config --global --add safe.directory /home/go2-control-stack/ros2_ws/foxglove-sdk
+
+ENV PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10
+
+RUN python3 -m pip install --no-cache-dir --prefer-binary --ignore-installed streamlit onnxruntime==1.18.1 "numpy<2"
+# ENV CMAKE_PREFIX_PATH=/usr/local/lib/python3.10/dist-packages/cmeel.prefix \
+#     LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/cmeel.prefix/lib:${LD_LIBRARY_PATH}
