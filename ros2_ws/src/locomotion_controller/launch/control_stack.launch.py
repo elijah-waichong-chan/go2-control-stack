@@ -56,6 +56,19 @@ def generate_launch_description():
             }],
         ),
         Node(
+            package='direction_intent_estimator',
+            executable='forward_backward_intent_estimator',
+            name='forward_backward_intent_estimator',
+            output='screen',
+            parameters=[{
+                'lowstate_topic': '/lowstate',
+                'qdq_topic': '/qdq_est',
+                'output_topic': '/direction_intent/forward_backward',
+                'status_topic': '/status/intent_estimator/forward_backward',
+                'status_hz': 10.0,
+            }],
+        ),
+        Node(
             package='arm_controller',
             executable='arm_feedback_parser',
             name='arm_feedback_parser',
