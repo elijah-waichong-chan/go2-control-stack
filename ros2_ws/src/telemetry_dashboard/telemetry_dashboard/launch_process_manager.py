@@ -21,18 +21,18 @@ def _cleanup_stale(name: str) -> None:
         _PROCESSES.pop(name, None)
 
 
-def start_launch(name: str, launch_file: str) -> Tuple[bool, str]:
+def start_launch(name: str, package: str, launch_file: str) -> Tuple[bool, str]:
     with _LOCK:
         _cleanup_stale(name)
         if name in _PROCESSES:
             return False, f"{name} already running"
 
         proc = subprocess.Popen(
-            ["ros2", "launch", "locomotion_controller", launch_file],
+            ["ros2", "launch", package, launch_file],
             start_new_session=True,
         )
         _PROCESSES[name] = proc
-        return True, f"started {launch_file}"
+        return True, f"started {package} {launch_file}"
 
 
 def stop_launch(name: str) -> Tuple[bool, str]:
@@ -69,5 +69,5 @@ def is_running(name: str) -> bool:
 
 
 def stop_all() -> None:
-    for name in ("control_stack", "mujoco_robot"):
+    for name in ("control_stack", "foxglove_bridge"):
         stop_launch(name)
