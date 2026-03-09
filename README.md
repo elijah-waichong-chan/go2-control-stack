@@ -1,88 +1,119 @@
-# ROS 2 Control Stack for Unitree Go2 Quadruped Robot
+# ROS 2 Control Stack for Unitree Go2
 
-Developed as part of the **UC Berkeley Master of Engineering (MEng)** capstone project in Mechanical Engineering.
+Developed as part of the UC Berkeley Master of Engineering capstone project in Mechanical Engineering.
 
-## Updates
+## Overview
 
-03/01/2026
-- Added locomotion RL controller policy
-- Added MuJoCo simulation option to validate the controller
-- Added extended kalman filter state estimator
+This repository contains a ROS 2 Humble control stack for the Unitree Go2, including:
 
-## Run Instructions
+- a Streamlit telemetry dashboard
+- stand-up initialization
+- an InEKF-based state estimator path
+- an RL locomotion controller
+- arm feedback parsing
+- direction intent estimation
+- Unitree SDK and description dependencies as submodules
 
-1. Build and source the workspace:
-   ```bash
-   cd ros2_ws
-   source /opt/ros/humble/setup.bash
-   colcon build --parallel-workers 2
-   source install/setup.bash
-   ```
+The dashboard can start and stop:
 
-2. Launch the dashboard:
-   ```bash
-   ros2 launch locomotion_controller dashboard.launch.py
-   ```
-   - At this point, a web-based dashboard should open on your browser
+- the main control stack
+- the Foxglove bridge
 
-3. If you want to run in simulation, click **Start MuJoCo** in the dashboard. If not, skip this step.
+## Clone
 
-4. Click **Start Control Stack** in the dashboard. The stack will:
-   - first run the stand-up motion sequence using a PD controller,
-   - then initialize the state estimator,
-   - then start the locomotion RL controller, which publishes commands to `/lowcmd`.
+Clone with submodules:
 
-## Repository Packages
+```bash
+git clone --recurse-submodules https://github.com/elijah-waichong-chan/go2-control-stack
+```
 
-| Package | Primary Language(s) | Description |
-| --- | --- | --- |
-| `locomotion_controller` | Python | Stand-up initialization and RL policy controller nodes, plus launch files for dashboard/simulation/control stack. |
-| `estimator_bridge` | Python | Converts estimator-related topics (odometry + joint states) into the `/qdq_est` format used by this stack. |
-| `telemetry_dashboard` | Python | Streamlit-based dashboard for status/plots and start-stop controls for MuJoCo and control stack. |
-| `xbox_controller_bridge` | Python | Maps joystick input (`/joy`) to locomotion command messages (`/locomotion_cmd`). |
-| `mujoco_robot` | C++ | MuJoCo simulation node for Go2 that publishes robot state and consumes low-level motor commands. |
-| `go2_odometry` | C++ and Python | Odometry and state-estimation package (including InEKF integration and state conversion utilities). |
-| `go2_msgs` | ROS 2 interface definitions (`.msg`) | Custom message definitions used across the control stack (for example `LocomotionCmd` and `QDq`). |
+## Submodules
 
-## Dependencies (Git Submodules)
-
-This repository depends on the following Git submodules:
-
-| Submodule Path | Upstream URL |
+| Submodule Path | URL |
 | --- | --- |
 | `ros2_ws/src/go2_odometry` | `https://github.com/elijah-waichong-chan/go2_odometry.git` |
 | `ros2_ws/src/unitree_ros2` | `https://github.com/unitreerobotics/unitree_ros2` |
 | `ros2_ws/src/unitree_description` | `https://github.com/inria-paris-robotics-lab/unitree_description.git` |
-| `ros2_ws/src/inekf` | `https://github.com/inria-paris-robotics-lab/invariant-ekf` |
+| `ros2_ws/src/inekf` | `https://github.com/elijah-waichong-chan/invariant-ekf.git` |
 
-Note: the `go2_odometry` submodule in this repository is a fork from the INRIA Paris Robotics Lab ecosystem: `https://github.com/inria-paris-robotics-lab`.
+## Docker
 
-To clone with submodules:
+Build the image:
 
 ```bash
-git clone --recurse-submodules <repo_url>
+docker build -t go2-ros2-control .
 ```
 
-If already cloned:
+Run the container with dashboard and Foxglove ports exposed:
 
 ```bash
-git submodule update --init --recursive
-```
-
-# =============================================
-
-```bash
-docker build -t go2-ros2-control .  # Builds image and names it
-docker run -d --mount type=bind,src="$(pwd)",dst=/home/go2-control-stack -p 8501:8501 go2-ros2-control sleep infinity  # Runs image in background
-
 docker run -d \
   --mount type=bind,src="$(pwd)",dst=/home/go2-control-stack \
   -p 8501:8501 \
   -p 8765:8765 \
   go2-ros2-control sleep infinity
-
-docker exec -it <container_id> bash  # Get container ID from `docker ps`
-
-docker image ls  # To see all built/pulled images
-docker ps  # To see all running containers
 ```
+
+Open a shell in the container:
+
+```bash
+docker exec -it <container_id> bash
+```
+
+Useful Docker commands:
+
+```bash
+docker image ls
+docker ps
+```
+
+## Build
+
+Inside the container or on a ROS 2 Humble host:
+
+```bash
+cd /home/go2-control-stack/ros2_ws
+source /opt/ros/humble/setup.bash
+colcon build --parallel-workers 4
+source install/setup.bash
+```
+
+## Run
+
+Launch the dashboard:
+
+```bash
+cd /home/go2-control-stack/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch locomotion_controller dashboard.launch.py
+```
+
+Then:
+
+1. Open the dashboard on `http://localhost:8501`
+2. Click `Start Control Stack` to launch the control stack
+3. Optionally click `Start Foxglove Bridge` to launch Foxglove socket node
+
+## Workspace Packages
+
+### Project Packages
+
+| Package | Description |
+| --- | --- |
+| `arm_controller` | Parses `/arm_Feedback`, publishes `/arm_angles`, and exposes arm parser status. |
+| `direction_intent_estimator` | Direction intent estimation nodes using 1-D CNN models. |
+| `estimator_bridge` | Converts estimator outputs into the `/qdq_est` format used by this stack. |
+| `go2_msgs` | Custom ROS 2 message definitions used across the stack. |
+| `locomotion_controller` | Stand-up initialization, RL policy control, safety stop handling, and launch files. |
+| `telemetry_dashboard` | Streamlit dashboard for module status, topic monitoring, and launch controls. |
+
+### Third-Party Packages
+
+| Package | Description |
+| --- | --- |
+| `go2_odometry` | Forked odometry and state-estimation package, including InEKF runtime nodes. |
+| `inekf` | Invariant EKF library dependency used by the estimator path. |
+| `unitree_arm` | Unitree arm interfaces and related dependencies. |
+| `unitree_description` | Robot description package used by the odometry and state publisher path. |
+| `unitree_ros2` | Unitree ROS 2 SDK and example packages. |
