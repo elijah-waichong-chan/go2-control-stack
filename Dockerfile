@@ -4,7 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ >/etc/timezone
 
-EXPOSE 8501
+EXPOSE 8501 8765
 
 RUN apt update
 RUN apt install -y software-properties-common tzdata
@@ -28,7 +28,8 @@ RUN apt upgrade -y
 RUN apt install -y ros-humble-ros-base ros-dev-tools 
 RUN apt install -y ros-humble-rosidl-generator-dds-idl libboost-test-dev
 RUN apt install -y ros-humble-pinocchio
+RUN apt install -y ros-humble-foxglove-bridge
 
 RUN pip install streamlit eigenpy onnxruntime
 RUN pip install "numpy<2"
-ENV CMAKE_PREFIX_PATH=/usr/local/lib/python3.10/dist-packages/cmeel.prefix:$CMAKE_PREFIX_PATH
+ENV CMAKE_PREFIX_PATH=/usr/local/lib/python3.10/dist-packages/cmeel.prefix
