@@ -41,30 +41,36 @@ git clone --recurse-submodules https://github.com/elijah-waichong-chan/go2-contr
 Build the image:
 
 ```bash
-docker build -t go2-ros2-control .
+sudo docker build -t go2-ros2-control .
 ```
 
-Run the container with dashboard and Foxglove ports exposed:
+Start and run the container:
 
 ```bash
-docker run -d \
+sudo docker run -d \
+  --net=host \
   --mount type=bind,src="$(pwd)",dst=/home/go2-control-stack \
-  -p 8501:8501 \
-  -p 8765:8765 \
+  --name go2-ros2-control \
   go2-ros2-control sleep infinity
 ```
 
 Open a shell in the container:
 
 ```bash
-docker exec -it <container_id> bash
+sudo docker exec -it <container_id> bash
 ```
+To start an existing container later:
+
+```bash
+sudo docker start go2-ros2-control
+```
+
 
 Useful Docker commands:
 
 ```bash
-docker image ls
-docker ps
+sudo docker image ls
+sudo docker ps
 ```
 
 ## Build
@@ -85,6 +91,9 @@ Launch the dashboard:
 ```bash
 cd /home/go2-control-stack/ros2_ws
 source /opt/ros/humble/setup.bash
+source /home/go2-control-stack/ros2_ws/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
 source install/setup.bash
 ros2 launch locomotion_controller dashboard.launch.py
 ```
