@@ -18,7 +18,7 @@ from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 from go2_msgs.msg import QDq, LocomotionCmd
 from sensor_msgs.msg import Joy
 from unitree_go.msg import LowState
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Int32
 from std_srvs.srv import Trigger
 from telemetry_dashboard import launch_process_manager
 
@@ -94,11 +94,14 @@ class TelemetryNode(Node):
         self._topic_available: Dict[str, bool] = {}
         self._topic_rate: Dict[str, float] = {}
         self._topic_last_time: Dict[str, float] = {}
+        self._topic_latest_msg: Dict[str, str] = {}
         self._topic_names = {
             "qdq": str(self.qdq_topic),
             "qdq_est": str(self.qdq_est_topic),
             "lowstate": "/lowstate",
             "joy": "/joy",
+            "intent_forward_backward": "/direction_intent/forward_backward",
+            "intent_left_right": "/direction_intent/left_right",
         }
 
         self.create_subscription(QDq, str(self.qdq_topic), self.on_qdq, qos)
@@ -106,6 +109,18 @@ class TelemetryNode(Node):
         self.create_subscription(LocomotionCmd, str(self.cmd_topic), self.on_cmd, qos)
         self.create_subscription(LowState, "/lowstate", self.on_lowstate, qos)
         self.create_subscription(Joy, "/joy", self.on_joy, qos)
+        self.create_subscription(
+            Int32,
+            self._topic_names["intent_forward_backward"],
+            lambda m: self.on_intent("intent_forward_backward", m),
+            qos,
+        )
+        self.create_subscription(
+            Int32,
+            self._topic_names["intent_left_right"],
+            lambda m: self.on_intent("intent_left_right", m),
+            qos,
+        )
 
         self.create_subscription(Bool, "/status/inekf/is_running",
                                  lambda m: self.on_status("inekf", m), status_qos)
@@ -115,6 +130,8 @@ class TelemetryNode(Node):
                                  lambda m: self.on_status("safety_stop", m), status_qos)
         self.create_subscription(Bool, "/status/standing_init",
                                  lambda m: self.on_status("standing_init", m), status_qos)
+        self.create_subscription(Bool, "/status/intent_estimator/is_running",
+                                 lambda m: self.on_status("intent_estimator", m), status_qos)
         self._graph_thread = threading.Thread(
             target=self._graph_monitor_loop,
             name=f"{node_name}_graph_monitor",
@@ -192,6 +209,13 @@ class TelemetryNode(Node):
             self._status["joy"] = (True, t)
             self._update_topic_rate("joy", t)
 
+    def on_intent(self, key: str, msg: Int32) -> None:
+        with self._lock:
+            t = time.monotonic()
+            self._status[key] = (True, t)
+            self._update_topic_rate(key, t)
+            self._topic_latest_msg[key] = str(int(msg.data))
+
     def _update_topic_rate(self, key: str, t: float) -> None:
         last_t = self._topic_last_time.get(key)
         if last_t is not None:
@@ -243,6 +267,7 @@ class TelemetryNode(Node):
                 "status": dict(self._status),
                 "topic_available": dict(self._topic_available),
                 "topic_rate": dict(self._topic_rate),
+                "topic_latest_msg": dict(self._topic_latest_msg),
                 "topic_names": dict(self._topic_names),
                 "status_timeout_s": self.status_timeout_s,
             }
@@ -297,12 +322,14 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
     labels = [
         ("inekf", "State Estimator"),
         ("rl_controller", "RL Controller"),
+        ("intent_estimator", "Intent Estimator"),
         ("safety_stop", "Safety Stop"),
     ]
 
     status_view = {
         "inekf": _get_fresh_status(status_map, "inekf", now, timeout),
         "rl_controller": _get_fresh_status(status_map, "loco_ctrl", now, timeout),
+        "intent_estimator": _get_fresh_status(status_map, "intent_estimator", now, timeout),
         "safety_stop": _get_fresh_status(status_map, "safety_stop", now, timeout),
     }
 
@@ -329,6 +356,8 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
                         st.warning(f"{label}: awaiting states")
                     elif key == "inekf":
                         st.warning(f"{label}: awaiting robot data")
+                    elif key == "intent_estimator":
+                        st.error(f"{label}: not running")
                     else:
                         st.error(f"{label}: not running")
 
@@ -424,7 +453,7 @@ def main() -> None:
     render_status(snapshot, snapshot["status_timeout_s"])
     st.subheader("Topics")
     topic_available = snapshot.get("topic_available", {})
-    topic_rates = snapshot.get("topic_rate", {})
+    topic_latest_msg = snapshot.get("topic_latest_msg", {})
     topic_names = snapshot.get("topic_names", {})
     topic_status_timeout = float(snapshot["status_timeout_s"])
     now = time.monotonic()
@@ -435,13 +464,22 @@ def main() -> None:
     topic_rows = [
         ("lowstate", "lowstate"),
         ("qdq_est", "qdq_est"),
+        ("intent_forward_backward", "intent_forward_backward"),
+        ("intent_left_right", "intent_left_right"),
     ]
     badges = []
     for key, status_key in topic_rows:
         topic_key = topic_names.get(key, f"/{key}")
         ok = _topic_ok(topic_key, status_key)
+        available = bool(topic_available.get(topic_key, False))
+        latest_msg = topic_latest_msg.get(key)
+        parts = [topic_key]
+        if latest_msg is not None and ok:
+            parts.append(f"msg={latest_msg}")
+        elif available:
+            parts.append("msg=waiting")
         cls = "topic-ok" if ok else "topic-bad"
-        badges.append(f"<span class=\"{cls}\">{topic_key}</span>")
+        badges.append(f"<span class=\"{cls}\">{' | '.join(parts)}</span>")
     st.markdown(
         """
         <style>
