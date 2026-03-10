@@ -18,13 +18,15 @@ from rclpy.qos import (
 from std_msgs.msg import Int32
 
 from direction_intent_estimator.model_runtime import (
-    RunningStatusHeartbeat,
     SlidingWindowIntentModel,
 )
 
 
 class LeftRightIntentEstimatorNode(Node):
     """Subscribe to arm angles, run ONNX inference, and publish intent labels."""
+
+    STATUS_RUNNING = 1
+    STATUS_WAITING_FOR_TOPICS = 2
 
     def __init__(self) -> None:
         super().__init__("left_right_intent_estimator")
@@ -37,8 +39,8 @@ class LeftRightIntentEstimatorNode(Node):
         self.declare_parameter("output_topic", "/direction_intent/left_right")
         self.declare_parameter("onnx_intra_threads", 1)
         self.declare_parameter("onnx_inter_threads", 1)
-        self.declare_parameter("status_topic", "/status/intent_estimator/is_running")
-        self.declare_parameter("status_hz", 1.0)
+        self.declare_parameter("status_topic", "/status/intent_estimator/left_right")
+        self.declare_parameter("status_hz", 10.0)
 
         self.model_dir = Path(str(self.get_parameter("model_dir").value)).expanduser()
         self.arm_angles_topic = str(self.get_parameter("arm_angles_topic").value)
@@ -53,11 +55,10 @@ class LeftRightIntentEstimatorNode(Node):
             onnx_intra_threads=self.onnx_intra_threads,
             onnx_inter_threads=self.onnx_inter_threads,
         )
-        self.status_heartbeat = RunningStatusHeartbeat(
-            node=self,
-            topic=self.status_topic,
-            hz=self.status_hz,
-        )
+        self.have_arm_angles = False
+        self.status_code = self.STATUS_WAITING_FOR_TOPICS
+        self.wait_logged = False
+        self.running_logged = False
 
         qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -65,11 +66,20 @@ class LeftRightIntentEstimatorNode(Node):
             reliability=QoSReliabilityPolicy.RELIABLE,
             durability=QoSDurabilityPolicy.VOLATILE,
         )
+        status_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
 
         self.sub_arm_angles = self.create_subscription(
             ArmAngles, self.arm_angles_topic, self.on_arm_angles, qos
         )
         self.pub_intent = self.create_publisher(Int32, self.output_topic, qos)
+        self.pub_status = self.create_publisher(Int32, self.status_topic, status_qos)
+        self.status_timer = self.create_timer(1.0 / max(1.0, self.status_hz), self.on_status_timer)
+        self._update_status()
 
         self.get_logger().info(
             "left_right_intent_estimator ready: "
@@ -83,8 +93,31 @@ class LeftRightIntentEstimatorNode(Node):
             f"labels={self.model.metadata.index_to_label}"
         )
 
+    def _set_status(self, status_code: int) -> None:
+        self.status_code = int(status_code)
+
+    def on_status_timer(self) -> None:
+        self.pub_status.publish(Int32(data=int(self.status_code)))
+
+    def _update_status(self) -> None:
+        if not self.have_arm_angles:
+            if not self.wait_logged:
+                self.get_logger().info(
+                    f"left_right_intent_estimator waiting for {self.arm_angles_topic}..."
+                )
+                self.wait_logged = True
+            self._set_status(self.STATUS_WAITING_FOR_TOPICS)
+            return
+
+        self._set_status(self.STATUS_RUNNING)
+        if not self.running_logged:
+            self.get_logger().info("left_right_intent_estimator running")
+            self.running_logged = True
+
     def on_arm_angles(self, msg: ArmAngles) -> None:
         """Accumulate a 60-step history window and publish the predicted label."""
+        self.have_arm_angles = True
+        self._update_status()
         try:
             pred_label = self.model.push(msg.angle_deg)
         except ValueError as exc:

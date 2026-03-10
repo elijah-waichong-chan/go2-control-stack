@@ -19,13 +19,15 @@ from std_msgs.msg import Int32
 from unitree_go.msg import LowState
 
 from direction_intent_estimator.model_runtime import (
-    RunningStatusHeartbeat,
     SlidingWindowIntentModel,
 )
 
 
 class ForwardBackwardIntentEstimatorNode(Node):
     """Run the 012 model from foot force, IMU acceleration, and qdq_est."""
+
+    STATUS_RUNNING = 1
+    STATUS_WAITING_FOR_TOPICS = 2
 
     def __init__(self) -> None:
         super().__init__("forward_backward_intent_estimator")
@@ -39,8 +41,8 @@ class ForwardBackwardIntentEstimatorNode(Node):
         self.declare_parameter("output_topic", "/direction_intent/forward_backward")
         self.declare_parameter("onnx_intra_threads", 1)
         self.declare_parameter("onnx_inter_threads", 1)
-        self.declare_parameter("status_topic", "/status/intent_estimator/is_running")
-        self.declare_parameter("status_hz", 1.0)
+        self.declare_parameter("status_topic", "/status/intent_estimator/forward_backward")
+        self.declare_parameter("status_hz", 10.0)
 
         self.model_dir = Path(str(self.get_parameter("model_dir").value)).expanduser()
         self.lowstate_topic = str(self.get_parameter("lowstate_topic").value)
@@ -57,19 +59,24 @@ class ForwardBackwardIntentEstimatorNode(Node):
             onnx_intra_threads=self.onnx_intra_threads,
             onnx_inter_threads=self.onnx_inter_threads,
         )
-        self.status_heartbeat = RunningStatusHeartbeat(
-            node=self,
-            topic=self.status_topic,
-            hz=self.status_hz,
-        )
-
         self.last_qdq: QDq | None = None
+        self.have_lowstate = False
+        self.have_qdq = False
+        self.status_code = self.STATUS_WAITING_FOR_TOPICS
+        self.waiting_on: str | None = None
+        self.running_logged = False
 
         sensor_qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=10,
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             durability=QoSDurabilityPolicy.VOLATILE,
+        )
+        status_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
 
         self.sub_lowstate = self.create_subscription(
@@ -79,6 +86,9 @@ class ForwardBackwardIntentEstimatorNode(Node):
             QDq, self.qdq_topic, self.on_qdq, sensor_qos
         )
         self.pub_intent = self.create_publisher(Int32, self.output_topic, 10)
+        self.pub_status = self.create_publisher(Int32, self.status_topic, status_qos)
+        self.status_timer = self.create_timer(1.0 / max(1.0, self.status_hz), self.on_status_timer)
+        self._update_status()
 
         self.get_logger().info(
             "forward_backward_intent_estimator ready: "
@@ -92,12 +102,46 @@ class ForwardBackwardIntentEstimatorNode(Node):
             f"labels={self.model.metadata.index_to_label}"
         )
 
+    def _set_status(self, status_code: int) -> None:
+        self.status_code = int(status_code)
+
+    def on_status_timer(self) -> None:
+        self.pub_status.publish(Int32(data=int(self.status_code)))
+
+    def _update_status(self) -> None:
+        missing_topics = []
+        if not self.have_lowstate:
+            missing_topics.append(self.lowstate_topic)
+        if not self.have_qdq:
+            missing_topics.append(self.qdq_topic)
+
+        if missing_topics:
+            waiting_on = ", ".join(missing_topics)
+            if waiting_on != self.waiting_on:
+                self.get_logger().info(
+                    "forward_backward_intent_estimator waiting for %s..."
+                    % waiting_on
+                )
+                self.waiting_on = waiting_on
+            self._set_status(self.STATUS_WAITING_FOR_TOPICS)
+            return
+
+        self.waiting_on = None
+        self._set_status(self.STATUS_RUNNING)
+        if not self.running_logged:
+            self.get_logger().info("forward_backward_intent_estimator running")
+            self.running_logged = True
+
     def on_qdq(self, msg: QDq) -> None:
         """Cache the latest qdq_est message for the next lowstate sample."""
         self.last_qdq = msg
+        self.have_qdq = True
+        self._update_status()
 
     def on_lowstate(self, msg: LowState) -> None:
         """Build a 19-feature sample and publish the predicted label."""
+        self.have_lowstate = True
+        self._update_status()
         if self.last_qdq is None:
             return
 
