@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 try:
     import numpy as np
@@ -61,16 +61,57 @@ def load_deploy_cfg(path: Path) -> dict[str, Any]:
     return cfg
 
 
+def first_existing_path(paths: Iterable[Path]) -> Path:
+    """Return the first existing path while preserving the declared fallback order."""
+    ordered_paths: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered_paths.append(path)
+        if path.exists():
+            return path
+    if not ordered_paths:
+        raise ValueError("Expected at least one candidate path.")
+    return ordered_paths[0]
+
+
+def resolve_deploy_path(model_dir: Path) -> Path:
+    """Resolve the current or legacy deploy YAML path inside a model bundle."""
+    params_dir = model_dir / "params"
+    primary = params_dir / "deploy.yaml"
+    if primary.exists():
+        return primary
+
+    legacy_candidates = sorted(params_dir.glob("*.deploy.yaml"))
+    if legacy_candidates:
+        return legacy_candidates[0]
+
+    raise RuntimeError(
+        f"deploy.yaml not found: {primary}. Checked legacy '*.deploy.yaml' files in {params_dir}."
+    )
+
+
 def resolve_model_path(deploy_path: Path, model_cfg: dict[str, Any]) -> Path:
-    """Resolve the ONNX path relative to the deploy YAML when needed."""
+    """Resolve the ONNX path for current and legacy bundle layouts."""
     raw_path = model_cfg.get("path")
     if not raw_path:
         raise RuntimeError("deploy.yaml model.path is required.")
-    model_path = Path(str(raw_path))
-    if not model_path.is_absolute():
-        model_path = (deploy_path.parent / model_path).resolve()
+    configured_path = Path(str(raw_path))
+    candidates: list[Path] = []
+    if configured_path.is_absolute():
+        candidates.append(configured_path)
+    else:
+        candidates.append((deploy_path.parent / configured_path).resolve())
+        if deploy_path.parent.name == "params":
+            candidates.append((deploy_path.parent.parent / "exported" / configured_path.name).resolve())
+
+    model_path = first_existing_path(candidates)
     if not model_path.exists():
-        raise RuntimeError(f"ONNX model not found: {model_path}")
+        checked_paths = ", ".join(str(path) for path in candidates)
+        raise RuntimeError(f"ONNX model not found. Checked: {checked_paths}")
     return model_path
 
 
@@ -97,7 +138,7 @@ class ModelMetadata:
 
 def load_model_metadata(model_dir: Path) -> ModelMetadata:
     """Load model metadata from a per-model bundle directory."""
-    deploy_path = model_dir / "params" / "deploy.yaml"
+    deploy_path = resolve_deploy_path(model_dir)
     deploy_cfg = load_deploy_cfg(deploy_path)
     model_cfg = deploy_cfg.get("model", {})
     preprocessing_cfg = deploy_cfg.get("preprocessing", {})
@@ -133,7 +174,7 @@ def load_model_metadata(model_dir: Path) -> ModelMetadata:
 
 
 class SlidingWindowIntentModel:
-    """Shared ONNX-backed sliding-window classifier for intent models."""
+    """Shared ONNX-backed, time-resampled sliding-window classifier."""
 
     def __init__(
         self,
@@ -142,11 +183,28 @@ class SlidingWindowIntentModel:
         model_dir: Path,
         onnx_intra_threads: int = 1,
         onnx_inter_threads: int = 1,
+        sliding_window_ms: float = 300.0,
+        sampling_hz: float = 200.0,
+        publish_hz: float = 10.0,
     ) -> None:
         require_runtime_dependencies()
         self.logger = logger
         self.metadata = load_model_metadata(model_dir)
-        self.history: deque[Any] = deque(maxlen=self.metadata.num_timesteps)
+        self.sliding_window_ms = max(1.0, float(sliding_window_ms))
+        self.sampling_hz = max(1.0, float(sampling_hz))
+        self.publish_hz = max(1.0, float(publish_hz))
+        self.sample_period_s = 1.0 / self.sampling_hz
+        self.publish_period_s = 1.0 / self.publish_hz
+        self.window_samples = int(round(self.sliding_window_ms * 1e-3 * self.sampling_hz))
+        if self.window_samples != self.metadata.num_timesteps:
+            raise RuntimeError(
+                "Configured sliding window requires %d timesteps, but model expects %d."
+                % (self.window_samples, self.metadata.num_timesteps)
+            )
+        self.window_span_s = max(0.0, (self.window_samples - 1) * self.sample_period_s)
+        self.max_history_age_s = self.window_span_s + self.publish_period_s + self.sample_period_s
+        self.history: deque[tuple[float, Any]] = deque()
+        self.last_inference_time_s: float | None = None
         self.input_name = self.metadata.input_name
         self.output_name = self.metadata.output_name
         self.session = self._create_onnx_session(
@@ -191,20 +249,60 @@ class SlidingWindowIntentModel:
             self.output_name = outputs[0].name
         return session
 
-    def push(self, features: Any) -> int | None:
-        """Append one feature vector and return a predicted label when ready."""
+    def _prune_history(self, now_s: float) -> None:
+        cutoff = now_s - self.max_history_age_s
+        while len(self.history) > 1 and self.history[1][0] < cutoff:
+            self.history.popleft()
+
+    def _has_full_window(self, now_s: float) -> bool:
+        if not self.history:
+            return False
+        oldest_needed_s = now_s - self.window_span_s
+        return self.history[0][0] <= oldest_needed_s
+
+    def _build_window(self, now_s: float) -> np.ndarray | None:
+        if not self._has_full_window(now_s):
+            return None
+        entries = list(self.history)
+        oldest_needed_s = now_s - self.window_span_s
+        if entries[0][0] > oldest_needed_s:
+            return None
+
+        window = np.empty((self.window_samples, self.metadata.num_features), dtype=np.float32)
+        entry_idx = 0
+        current = entries[0][1]
+        for i in range(self.window_samples):
+            target_time_s = oldest_needed_s + i * self.sample_period_s
+            while entry_idx + 1 < len(entries) and entries[entry_idx + 1][0] <= target_time_s:
+                entry_idx += 1
+                current = entries[entry_idx][1]
+            window[i] = current
+        return window
+
+    def push(self, features: Any, sample_time_s: float) -> int | None:
+        """Append one feature vector and return a throttled predicted label when ready."""
         vector = np.asarray(features, dtype=np.float32)
         if vector.shape != (self.metadata.num_features,):
             raise ValueError(
                 "Expected %d features, got shape %s."
                 % (self.metadata.num_features, vector.shape)
             )
+        if not np.isfinite(sample_time_s):
+            raise ValueError(f"Expected finite sample_time_s, got {sample_time_s!r}.")
+        if self.history and sample_time_s < self.history[-1][0]:
+            sample_time_s = self.history[-1][0]
 
-        self.history.append(vector)
-        if len(self.history) < self.metadata.num_timesteps:
+        self.history.append((sample_time_s, vector.copy()))
+        self._prune_history(sample_time_s)
+        if not self._has_full_window(sample_time_s):
             return None
+        if self.last_inference_time_s is not None:
+            if (sample_time_s - self.last_inference_time_s) < self.publish_period_s:
+                return None
 
-        window = np.asarray(self.history, dtype=np.float32)
+        window = self._build_window(sample_time_s)
+        if window is None:
+            return None
         if self.metadata.normalize:
             window = (window - self.metadata.x_mean) / self.metadata.x_std
 
@@ -215,4 +313,5 @@ class SlidingWindowIntentModel:
             logits = logits[0]
         logits = logits.reshape(-1)
         pred_index = int(np.argmax(logits))
+        self.last_inference_time_s = sample_time_s
         return self.metadata.index_to_label.get(pred_index, pred_index)
