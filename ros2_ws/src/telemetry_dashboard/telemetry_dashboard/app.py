@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 
+from collections import deque
 import os
 import threading
 import time
 import uuid
-from typing import Dict, Tuple
+from typing import Deque, Dict, Tuple
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -26,6 +27,7 @@ class TelemetryNode(Node):
 
         self.status_timeout_s = float(self.declare_parameter("status_timeout_s", 3.0).value)
         self.graph_poll_hz = float(self.declare_parameter("graph_poll_hz", 1.0).value)
+        self.topic_rate_window_s = 1.0
 
         qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -43,8 +45,7 @@ class TelemetryNode(Node):
 
         self._status: Dict[str, Tuple[object, float]] = {}
         self._topic_available: Dict[str, bool] = {}
-        self._topic_rate: Dict[str, float] = {}
-        self._topic_last_time: Dict[str, float] = {}
+        self._topic_timestamps: Dict[str, Deque[float]] = {}
         self._topic_latest_msg: Dict[str, str] = {}
         self._topic_names = {
             "qdq_est": "/qdq_est",
@@ -96,8 +97,18 @@ class TelemetryNode(Node):
             lambda m: self.on_status_value("standing_init", int(m.data)),
             status_qos,
         )
-        self.create_subscription(Bool, "/status/intent_estimator/is_running",
-                                 lambda m: self.on_status("intent_estimator", m), status_qos)
+        self.create_subscription(
+            Int32,
+            "/status/intent_estimator/forward_backward",
+            lambda m: self.on_status_value("intent_estimator_forward_backward", int(m.data)),
+            status_qos,
+        )
+        self.create_subscription(
+            Int32,
+            "/status/intent_estimator/left_right",
+            lambda m: self.on_status_value("intent_estimator_left_right", int(m.data)),
+            status_qos,
+        )
         self._graph_thread = threading.Thread(
             target=self._graph_monitor_loop,
             name=f"{node_name}_graph_monitor",
@@ -139,15 +150,21 @@ class TelemetryNode(Node):
             self._topic_latest_msg[key] = str(int(msg.data))
 
     def _update_topic_rate(self, key: str, t: float) -> None:
-        last_t = self._topic_last_time.get(key)
-        if last_t is not None:
-            dt = t - last_t
-            if dt > 1e-6:
-                inst = 1.0 / dt
-                prev = self._topic_rate.get(key, inst)
-                # Light smoothing to avoid flicker.
-                self._topic_rate[key] = 0.8 * prev + 0.2 * inst
-        self._topic_last_time[key] = t
+        samples = self._topic_timestamps.setdefault(key, deque())
+        samples.append(t)
+        cutoff = t - self.topic_rate_window_s
+        while samples and samples[0] < cutoff:
+            samples.popleft()
+
+    def _snapshot_topic_rates_locked(self, now: float) -> Dict[str, float]:
+        rates: Dict[str, float] = {}
+        cutoff = now - self.topic_rate_window_s
+        for key, samples in self._topic_timestamps.items():
+            while samples and samples[0] < cutoff:
+                samples.popleft()
+            if samples:
+                rates[key] = len(samples) / self.topic_rate_window_s
+        return rates
 
     def _update_topic_availability(self) -> None:
         try:
@@ -168,10 +185,11 @@ class TelemetryNode(Node):
 
     def snapshot(self) -> Dict[str, object]:
         with self._lock:
+            now = time.monotonic()
             return {
                 "status": dict(self._status),
                 "topic_available": dict(self._topic_available),
-                "topic_rate": dict(self._topic_rate),
+                "topic_rate": self._snapshot_topic_rates_locked(now),
                 "topic_latest_msg": dict(self._topic_latest_msg),
                 "topic_names": dict(self._topic_names),
                 "status_timeout_s": self.status_timeout_s,
@@ -219,6 +237,29 @@ def _get_fresh_status(status_map: Dict[str, Tuple[object, float]], key: str, now
     return val
 
 
+def _get_intent_estimator_status(
+    status_map: Dict[str, Tuple[object, float]], now: float, timeout: float
+):
+    fb = _get_fresh_status(status_map, "intent_estimator_forward_backward", now, timeout)
+    lr = _get_fresh_status(status_map, "intent_estimator_left_right", now, timeout)
+
+    if fb is None or lr is None:
+        return None
+
+    fb_status = int(fb)
+    lr_status = int(lr)
+
+    if fb_status == 1 and lr_status == 1:
+        return 1
+    if fb_status == 2 and lr_status == 1:
+        return 2
+    if fb_status == 1 and lr_status == 2:
+        return 3
+    if fb_status == 2 and lr_status == 2:
+        return 4
+    return 0
+
+
 def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
     now = time.monotonic()
     timeout = float(timeout_s)
@@ -238,7 +279,7 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
         "standing_init": _get_fresh_status(status_map, "standing_init", now, timeout),
         "arm_parser": _get_fresh_status(status_map, "arm_parser", now, timeout),
         "rl_controller": _get_fresh_status(status_map, "loco_ctrl", now, timeout),
-        "intent_estimator": _get_fresh_status(status_map, "intent_estimator", now, timeout),
+        "intent_estimator": _get_intent_estimator_status(status_map, now, timeout),
         "safety_stop": _get_fresh_status(status_map, "safety_stop", now, timeout),
     }
 
@@ -294,13 +335,22 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
                         st.warning(f"{label}: waiting for standing-init readiness (3)")
                     else:
                         st.error(f"{label}: idle (0)")
+                elif key == "intent_estimator":
+                    intent_status = int(val)
+                    if intent_status == 1:
+                        st.success(f"{label}: running (1)")
+                    elif intent_status == 2:
+                        st.warning(f"{label}: forward/backward waiting for topics (2)")
+                    elif intent_status == 3:
+                        st.warning(f"{label}: left/right waiting for topics (3)")
+                    elif intent_status == 4:
+                        st.warning(f"{label}: both nodes waiting for topics (4)")
+                    else:
+                        st.error(f"{label}: idle ({int(val)})")
                 elif bool(val):
                     st.success(f"{label}: running")
                 else:
-                    if key == "intent_estimator":
-                        st.error(f"{label}: not running")
-                    else:
-                        st.error(f"{label}: not running")
+                    st.error(f"{label}: not running")
 
 
 def _style_sidebar_buttons(locomotion_active: bool, foxglove_active: bool) -> None:
@@ -428,9 +478,9 @@ def _render_dashboard(node: TelemetryNode) -> None:
                 parts.append(f"hz={rate_hz:.1f}")
             else:
                 parts.append("hz=--")
-        if latest_msg is not None and ok:
+        if key.startswith("intent_") and latest_msg is not None and ok:
             parts.append(f"msg={latest_msg}")
-        elif available and ok is not False:
+        elif key.startswith("intent_") and available and ok is not False:
             parts.append("msg=waiting")
         cls = "topic-ok" if ok else "topic-bad"
         badges.append(f"<span class=\"{cls}\">{' | '.join(parts)}</span>")
