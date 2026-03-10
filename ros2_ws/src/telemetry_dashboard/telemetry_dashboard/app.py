@@ -15,7 +15,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 
 from go2_msgs.msg import ArmAngles, QDq
-from unitree_go.msg import LowState
+from unitree_go.msg import LowCmd, LowState
 from std_msgs.msg import Bool, Int32
 from std_srvs.srv import Trigger
 from telemetry_dashboard import launch_process_manager
@@ -50,13 +50,15 @@ class TelemetryNode(Node):
         self._topic_names = {
             "qdq_est": "/qdq_est",
             "lowstate": "/lowstate",
+            "lowcmd": "/lowcmd",
             "arm_angles": "/arm_angles",
             "intent_forward_backward": "/direction_intent/forward_backward",
             "intent_left_right": "/direction_intent/left_right",
         }
 
         self.create_subscription(QDq, self._topic_names["qdq_est"], self.on_qdq_est, qos)
-        self.create_subscription(LowState, "/lowstate", self.on_lowstate, qos)
+        self.create_subscription(LowState, self._topic_names["lowstate"], self.on_lowstate, qos)
+        self.create_subscription(LowCmd, self._topic_names["lowcmd"], self.on_lowcmd, qos)
         self.create_subscription(ArmAngles, self._topic_names["arm_angles"], self.on_arm_angles, qos)
         self.create_subscription(
             Int32,
@@ -135,6 +137,12 @@ class TelemetryNode(Node):
             t = time.monotonic()
             self._status["lowstate"] = (True, t)
             self._update_topic_rate("lowstate", t)
+
+    def on_lowcmd(self, msg: LowCmd) -> None:
+        with self._lock:
+            t = time.monotonic()
+            self._status["lowcmd"] = (True, t)
+            self._update_topic_rate("lowcmd", t)
 
     def on_arm_angles(self, msg: ArmAngles) -> None:
         with self._lock:
@@ -495,6 +503,7 @@ def _render_dashboard(node: TelemetryNode) -> None:
 
     topic_rows = [
         ("lowstate", "lowstate"),
+        ("lowcmd", "lowcmd"),
         ("qdq_est", "qdq_est"),
         ("arm_angles", "arm_angles"),
         ("intent_forward_backward", "intent_forward_backward"),
