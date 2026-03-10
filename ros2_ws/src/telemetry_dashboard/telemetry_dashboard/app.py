@@ -243,11 +243,11 @@ def _get_intent_estimator_status(
     fb = _get_fresh_status(status_map, "intent_estimator_forward_backward", now, timeout)
     lr = _get_fresh_status(status_map, "intent_estimator_left_right", now, timeout)
 
-    if fb is None or lr is None:
+    if fb is None and lr is None:
         return None
 
-    fb_status = int(fb)
-    lr_status = int(lr)
+    fb_status = int(fb) if fb is not None else None
+    lr_status = int(lr) if lr is not None else None
 
     if fb_status == 1 and lr_status == 1:
         return 1
@@ -257,6 +257,14 @@ def _get_intent_estimator_status(
         return 3
     if fb_status == 2 and lr_status == 2:
         return 4
+    if fb_status == 1 and lr_status is None:
+        return 5
+    if lr_status == 1 and fb_status is None:
+        return 6
+    if fb_status == 2 and lr_status is None:
+        return 7
+    if lr_status == 2 and fb_status is None:
+        return 8
     return 0
 
 
@@ -345,6 +353,14 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
                         st.warning(f"{label}: left/right waiting for topics (3)")
                     elif intent_status == 4:
                         st.warning(f"{label}: both nodes waiting for topics (4)")
+                    elif intent_status == 5:
+                        st.warning(f"{label}: forward/backward running, left/right status missing (5)")
+                    elif intent_status == 6:
+                        st.warning(f"{label}: left/right running, forward/backward status missing (6)")
+                    elif intent_status == 7:
+                        st.warning(f"{label}: forward/backward waiting, left/right status missing (7)")
+                    elif intent_status == 8:
+                        st.warning(f"{label}: left/right waiting, forward/backward status missing (8)")
                     else:
                         st.error(f"{label}: idle ({int(val)})")
                 elif bool(val):

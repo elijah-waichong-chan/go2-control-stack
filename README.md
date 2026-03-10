@@ -104,6 +104,12 @@ Then:
 2. Click `Start Control Stack` to launch the control stack
 3. Optionally click `Start Foxglove Bridge` to launch Foxglove socket node
 
+ROS Bag collection
+
+```bash
+ros2 bag record -s mcap -o "direction_estimator_bag_$(date +%Y%m%d_%H%M%S)" /data/push_event /lowstate /arm_angles
+```
+
 ## Workspace Packages
 
 ### Project Packages

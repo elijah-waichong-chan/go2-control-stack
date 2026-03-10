@@ -39,7 +39,8 @@ RUN apt update && apt upgrade -y && apt install -y \
     ros-humble-pinocchio \
     ros-humble-rmw-cyclonedds-cpp \
     ros-humble-ros-base \
-    ros-humble-rosidl-generator-dds-idl
+    ros-humble-rosidl-generator-dds-idl \
+    ros-humble-rosbag2-storage-mcap
 
 RUN git config --global --add safe.directory /home/go2-control-stack/ros2_ws/foxglove-sdk
 

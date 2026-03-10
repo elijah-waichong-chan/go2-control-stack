@@ -69,6 +69,18 @@ def generate_launch_description():
             }],
         ),
         Node(
+            package='direction_intent_estimator',
+            executable='left_right_intent_estimator',
+            name='left_right_intent_estimator',
+            output='screen',
+            parameters=[{
+                'arm_angles_topic': '/arm_angles',
+                'output_topic': '/direction_intent/left_right',
+                'status_topic': '/status/intent_estimator/left_right',
+                'status_hz': 10.0,
+            }],
+        ),
+        Node(
             package='arm_controller',
             executable='arm_feedback_parser',
             name='arm_feedback_parser',
