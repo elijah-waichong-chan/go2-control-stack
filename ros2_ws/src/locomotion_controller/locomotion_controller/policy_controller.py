@@ -219,10 +219,15 @@ class PolicyControllerNode(Node):
             )
         if not policy_path.exists():
             raise RuntimeError(f"policy.onnx not found: {policy_path}")
+        self.get_logger().info(f"Loading ONNX policy from {policy_path}")
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = max(1, int(self.onnx_intra_threads))
         opts.inter_op_num_threads = max(1, int(self.onnx_inter_threads))
         opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        # Prefer the most conservative runtime settings on embedded/container targets.
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+        opts.enable_cpu_mem_arena = False
+        opts.enable_mem_pattern = False
         sess = ort.InferenceSession(
             str(policy_path),
             sess_options=opts,
@@ -232,6 +237,10 @@ class PolicyControllerNode(Node):
         outputs = sess.get_outputs()
         if not inputs or not outputs:
             raise RuntimeError("ONNX model has no inputs or outputs.")
+        self.get_logger().info(
+            f"Loaded ONNX policy input={inputs[0].name} shape={inputs[0].shape} "
+            f"output={outputs[0].name} shape={outputs[0].shape}"
+        )
         return sess, inputs[0].name, outputs[0].name
 
     def on_lowstate(self, msg: LowState) -> None:
