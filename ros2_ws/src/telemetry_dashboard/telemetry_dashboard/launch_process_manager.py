@@ -4,6 +4,8 @@ import os
 import signal
 import subprocess
 import threading
+import time
+from typing import Sequence
 from typing import Dict, Tuple
 
 
@@ -21,18 +23,51 @@ def _cleanup_stale(name: str) -> None:
         _PROCESSES.pop(name, None)
 
 
+def _start_process(name: str, command: Sequence[str], success_message: str) -> Tuple[bool, str]:
+    _cleanup_stale(name)
+    if name in _PROCESSES:
+        return False, f"{name} already running"
+
+    proc = subprocess.Popen(
+        list(command),
+        start_new_session=True,
+    )
+    _PROCESSES[name] = proc
+    return True, success_message
+
+
 def start_launch(name: str, package: str, launch_file: str) -> Tuple[bool, str]:
     with _LOCK:
-        _cleanup_stale(name)
-        if name in _PROCESSES:
-            return False, f"{name} already running"
-
-        proc = subprocess.Popen(
+        return _start_process(
+            name,
             ["ros2", "launch", package, launch_file],
-            start_new_session=True,
+            f"started {package} {launch_file}",
         )
-        _PROCESSES[name] = proc
-        return True, f"started {package} {launch_file}"
+
+
+def start_rosbag_recording() -> Tuple[bool, str]:
+    with _LOCK:
+        bag_name = time.strftime("go2_data_%Y%m%d_%H%M%S")
+        return _start_process(
+            "rosbag_recording",
+            [
+                "ros2",
+                "bag",
+                "record",
+                "-s",
+                "mcap",
+                "-o",
+                bag_name,
+                "/data/push_event",
+                "/lowstate",
+                "/arm_angles",
+                "/joint_states",
+                "/robot_description",
+                "/tf",
+                "/tf_static",
+            ],
+            f"started rosbag recording to {bag_name}",
+        )
 
 
 def stop_launch(name: str) -> Tuple[bool, str]:
@@ -69,5 +104,5 @@ def is_running(name: str) -> bool:
 
 
 def stop_all() -> None:
-    for name in ("control_stack", "foxglove_bridge"):
+    for name in ("control_stack", "foxglove_bridge", "rosbag_recording"):
         stop_launch(name)

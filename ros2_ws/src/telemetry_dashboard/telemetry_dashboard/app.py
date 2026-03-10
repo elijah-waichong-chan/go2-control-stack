@@ -353,7 +353,11 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
                     st.error(f"{label}: not running")
 
 
-def _style_sidebar_buttons(locomotion_active: bool, foxglove_active: bool) -> None:
+def _style_sidebar_buttons(
+    locomotion_active: bool,
+    foxglove_active: bool,
+    rosbag_active: bool,
+) -> None:
     start_green = "#2ecc71"
     start_border = "#27ae60"
     stop_red = "#e74c3c"
@@ -364,6 +368,9 @@ def _style_sidebar_buttons(locomotion_active: bool, foxglove_active: bool) -> No
     foxglove_label = "Stop Foxglove Bridge" if foxglove_active else "Start Foxglove Bridge"
     foxglove_bg = stop_red if foxglove_active else start_green
     foxglove_border = stop_border if foxglove_active else start_border
+    rosbag_label = "Stop Rosbag Recording" if rosbag_active else "Start Rosbag Recording"
+    rosbag_bg = stop_red if rosbag_active else start_green
+    rosbag_border = stop_border if rosbag_active else start_border
     js = f"""
     <script>
     const styleBtn = (label, bg, border) => {{
@@ -383,6 +390,7 @@ def _style_sidebar_buttons(locomotion_active: bool, foxglove_active: bool) -> No
       let ok = true;
       ok = styleBtn('{control_label}', '{control_bg}', '{control_border}') && ok;
       ok = styleBtn('{foxglove_label}', '{foxglove_bg}', '{foxglove_border}') && ok;
+      ok = styleBtn('{rosbag_label}', '{rosbag_bg}', '{rosbag_border}') && ok;
       ok = styleBtn('EMERGENCY STOP', '{stop_red}', '{stop_border}') && ok;
       if (!ok) setTimeout(apply, 100);
     }};
@@ -409,6 +417,7 @@ def _render_sidebar(node: TelemetryNode) -> None:
     # Consider control stack active when the RL controller status stream is alive.
     locomotion_active = (rl_ctrl_status is not None) or launch_process_manager.is_running("control_stack")
     foxglove_active = launch_process_manager.is_running("foxglove_bridge")
+    rosbag_active = launch_process_manager.is_running("rosbag_recording")
     control_label = "Stop Control Stack" if locomotion_active else "Start Control Stack"
     if st.button(control_label, key="toggle_ctrl", use_container_width=True):
         if locomotion_active:
@@ -433,6 +442,16 @@ def _render_sidebar(node: TelemetryNode) -> None:
             st.info(msg)
         else:
             st.warning(msg)
+    rosbag_label = "Stop Rosbag Recording" if rosbag_active else "Start Rosbag Recording"
+    if st.button(rosbag_label, key="toggle_rosbag", use_container_width=True):
+        if rosbag_active:
+            ok, msg = launch_process_manager.stop_launch("rosbag_recording")
+        else:
+            ok, msg = launch_process_manager.start_rosbag_recording()
+        if ok:
+            st.info(msg)
+        else:
+            st.warning(msg)
     if st.button("EMERGENCY STOP", key="emergency_stop", use_container_width=True):
         client = st.session_state.get("svc_emergency_stop")
         if client is None or not client.service_is_ready():
@@ -440,7 +459,7 @@ def _render_sidebar(node: TelemetryNode) -> None:
         else:
             client.call_async(Trigger.Request())
             st.error("Emergency stop requested")
-    _style_sidebar_buttons(locomotion_active, foxglove_active)
+    _style_sidebar_buttons(locomotion_active, foxglove_active, rosbag_active)
 
 def _render_dashboard(node: TelemetryNode) -> None:
     snapshot = node.snapshot()
