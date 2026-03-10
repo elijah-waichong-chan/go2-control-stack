@@ -7,14 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from rclpy.qos import (
-    QoSDurabilityPolicy,
-    QoSHistoryPolicy,
-    QoSProfile,
-    QoSReliabilityPolicy,
-)
-from std_msgs.msg import Bool
-
 try:
     import numpy as np
 except ModuleNotFoundError:  # pragma: no cover - runtime check
@@ -224,31 +216,3 @@ class SlidingWindowIntentModel:
         logits = logits.reshape(-1)
         pred_index = int(np.argmax(logits))
         return self.metadata.index_to_label.get(pred_index, pred_index)
-
-
-class RunningStatusHeartbeat:
-    """Publish a periodic Bool heartbeat while a node is alive."""
-
-    def __init__(
-        self,
-        *,
-        node: Any,
-        topic: str = "/status/intent_estimator/is_running",
-        hz: float = 1.0,
-    ) -> None:
-        self.node = node
-        self.topic = str(topic)
-        self.hz = max(0.1, float(hz))
-        qos = QoSProfile(
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=1,
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-        )
-        self.publisher = node.create_publisher(Bool, self.topic, qos)
-        self.timer = node.create_timer(1.0 / self.hz, self.publish)
-        self.publish()
-
-    def publish(self) -> None:
-        """Publish a True heartbeat sample."""
-        self.publisher.publish(Bool(data=True))
