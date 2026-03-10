@@ -80,7 +80,7 @@ Inside the container or on a ROS 2 Humble host:
 ```bash
 cd /home/go2-control-stack/ros2_ws
 source /opt/ros/humble/setup.bash
-colcon build --parallel-workers 4
+colcon build --parallel-workers 4 --cmake-clean-cache
 source install/setup.bash
 ```
 
