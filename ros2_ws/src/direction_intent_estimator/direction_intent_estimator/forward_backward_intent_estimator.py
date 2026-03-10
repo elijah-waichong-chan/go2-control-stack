@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
@@ -20,7 +21,21 @@ from unitree_go.msg import LowState
 
 from direction_intent_estimator.model_runtime import (
     SlidingWindowIntentModel,
+    first_existing_path,
 )
+
+
+def _default_model_dir(bundle_name: str) -> Path:
+    """Resolve the first usable model bundle path across install and source layouts."""
+    module_path = Path(__file__).resolve()
+    share_dir = Path(get_package_share_directory("direction_intent_estimator"))
+    return first_existing_path(
+        [
+            share_dir / "config" / "models" / bundle_name,
+            module_path.parents[1] / "config" / "models" / bundle_name,
+            module_path.parents[3] / "src" / "direction_intent_estimator" / "config" / "models" / bundle_name,
+        ]
+    )
 
 
 class ForwardBackwardIntentEstimatorNode(Node):
@@ -32,8 +47,7 @@ class ForwardBackwardIntentEstimatorNode(Node):
     def __init__(self) -> None:
         super().__init__("forward_backward_intent_estimator")
 
-        share_dir = Path(get_package_share_directory("direction_intent_estimator"))
-        default_model_dir = share_dir / "config" / "models" / "012"
+        default_model_dir = _default_model_dir("012")
 
         self.declare_parameter("model_dir", str(default_model_dir))
         self.declare_parameter("lowstate_topic", "/lowstate")
@@ -43,6 +57,9 @@ class ForwardBackwardIntentEstimatorNode(Node):
         self.declare_parameter("onnx_inter_threads", 1)
         self.declare_parameter("status_topic", "/status/intent_estimator/forward_backward")
         self.declare_parameter("status_hz", 10.0)
+        self.declare_parameter("sliding_window_ms", 300.0)
+        self.declare_parameter("sampling_hz", 200.0)
+        self.declare_parameter("publish_hz", 10.0)
 
         self.model_dir = Path(str(self.get_parameter("model_dir").value)).expanduser()
         self.lowstate_topic = str(self.get_parameter("lowstate_topic").value)
@@ -52,12 +69,18 @@ class ForwardBackwardIntentEstimatorNode(Node):
         self.onnx_inter_threads = int(self.get_parameter("onnx_inter_threads").value)
         self.status_topic = str(self.get_parameter("status_topic").value)
         self.status_hz = float(self.get_parameter("status_hz").value)
+        self.sliding_window_ms = max(1.0, float(self.get_parameter("sliding_window_ms").value))
+        self.sampling_hz = max(1.0, float(self.get_parameter("sampling_hz").value))
+        self.publish_hz = max(1.0, float(self.get_parameter("publish_hz").value))
 
         self.model = SlidingWindowIntentModel(
             logger=self.get_logger(),
             model_dir=self.model_dir,
             onnx_intra_threads=self.onnx_intra_threads,
             onnx_inter_threads=self.onnx_inter_threads,
+            sliding_window_ms=self.sliding_window_ms,
+            sampling_hz=self.sampling_hz,
+            publish_hz=self.publish_hz,
         )
         self.last_qdq: QDq | None = None
         self.have_lowstate = False
@@ -95,6 +118,8 @@ class ForwardBackwardIntentEstimatorNode(Node):
             f"{self.lowstate_topic} + {self.qdq_topic} -> {self.output_topic}, "
             f"status={self.status_topic}, "
             f"model={self.model.metadata.model_path}, "
+            f"window={self.sliding_window_ms:.0f}ms@{self.sampling_hz:.0f}Hz, "
+            f"publish={self.publish_hz:.1f}Hz, "
             f"input={self.model.input_name}[batch,"
             f"{self.model.metadata.num_features},"
             f"{self.model.metadata.num_timesteps}], "
@@ -139,7 +164,7 @@ class ForwardBackwardIntentEstimatorNode(Node):
         self._update_status()
 
     def on_lowstate(self, msg: LowState) -> None:
-        """Build a 19-feature sample and publish the predicted label."""
+        """Build a 19-feature sample and publish the throttled predicted label."""
         self.have_lowstate = True
         self._update_status()
         if self.last_qdq is None:
@@ -169,7 +194,7 @@ class ForwardBackwardIntentEstimatorNode(Node):
         features = foot_force + accel + joint_dq
 
         try:
-            pred_label = self.model.push(features)
+            pred_label = self.model.push(features, time.monotonic())
         except ValueError as exc:
             self.get_logger().error(str(exc))
             return
