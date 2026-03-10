@@ -47,5 +47,3 @@ ENV PIP_DEFAULT_TIMEOUT=120 \
     PIP_RETRIES=10
 
 RUN python3 -m pip install --no-cache-dir --prefer-binary --ignore-installed streamlit onnxruntime==1.18.1 "numpy<2"
-# ENV CMAKE_PREFIX_PATH=/usr/local/lib/python3.10/dist-packages/cmeel.prefix \
-#     LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/cmeel.prefix/lib:${LD_LIBRARY_PATH}
