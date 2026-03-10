@@ -1,6 +1,6 @@
 model:
   format: onnx
-  path: ../exported/policy.onnx
+  path: direction_classifier_012.onnx
   input_name: input
   output_name: logits
   opset_version: 18
