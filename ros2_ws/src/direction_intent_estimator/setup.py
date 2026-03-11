@@ -35,6 +35,7 @@ setup(
         'console_scripts': [
             'forward_backward_intent_estimator = direction_intent_estimator.forward_backward_intent_estimator:main',
             'left_right_intent_estimator = direction_intent_estimator.left_right_intent_estimator:main',
+            'forward_backward_intent_cmd_publisher = direction_intent_estimator.forward_backward_intent_cmd_publisher:main',
         ],
     },
 )
