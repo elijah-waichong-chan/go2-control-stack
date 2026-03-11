@@ -23,7 +23,11 @@ def _cleanup_stale(name: str) -> None:
         _PROCESSES.pop(name, None)
 
 
-def _start_process(name: str, command: Sequence[str], success_message: str) -> Tuple[bool, str]:
+def _start_process(
+    name: str,
+    command: Sequence[str],
+    success_message: str,
+) -> Tuple[bool, str]:
     _cleanup_stale(name)
     if name in _PROCESSES:
         return False, f"{name} already running"
@@ -36,7 +40,11 @@ def _start_process(name: str, command: Sequence[str], success_message: str) -> T
     return True, success_message
 
 
-def start_launch(name: str, package: str, launch_file: str) -> Tuple[bool, str]:
+def start_launch(
+    name: str,
+    package: str,
+    launch_file: str,
+) -> Tuple[bool, str]:
     with _LOCK:
         return _start_process(
             name,
@@ -104,5 +112,10 @@ def is_running(name: str) -> bool:
 
 
 def stop_all() -> None:
-    for name in ("control_stack", "foxglove_bridge", "rosbag_recording"):
+    for name in (
+        "control_stack",
+        "autonomy",
+        "foxglove_bridge",
+        "rosbag_recording",
+    ):
         stop_launch(name)
