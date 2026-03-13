@@ -21,6 +21,7 @@ from unitree_go.msg import LowState
 
 from direction_intent_estimator.model_runtime import (
     SlidingWindowIntentModel,
+    default_onnx_intra_threads,
     first_existing_path,
 )
 
@@ -53,7 +54,7 @@ class ForwardBackwardIntentEstimatorNode(Node):
         self.declare_parameter("lowstate_topic", "/lowstate")
         self.declare_parameter("qdq_topic", "/qdq_est")
         self.declare_parameter("output_topic", "/direction_intent/forward_backward")
-        self.declare_parameter("onnx_intra_threads", 1)
+        self.declare_parameter("onnx_intra_threads", default_onnx_intra_threads())
         self.declare_parameter("onnx_inter_threads", 1)
         self.declare_parameter("status_topic", "/status/intent_estimator/forward_backward")
         self.declare_parameter("status_hz", 10.0)

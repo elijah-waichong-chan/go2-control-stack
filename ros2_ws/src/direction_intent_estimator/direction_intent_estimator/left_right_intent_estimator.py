@@ -20,6 +20,7 @@ from std_msgs.msg import Int32
 
 from direction_intent_estimator.model_runtime import (
     SlidingWindowIntentModel,
+    default_onnx_intra_threads,
     first_existing_path,
 )
 
@@ -51,7 +52,7 @@ class LeftRightIntentEstimatorNode(Node):
         self.declare_parameter("model_dir", str(default_model_dir))
         self.declare_parameter("arm_angles_topic", "/arm_angles")
         self.declare_parameter("output_topic", "/direction_intent/left_right")
-        self.declare_parameter("onnx_intra_threads", 1)
+        self.declare_parameter("onnx_intra_threads", default_onnx_intra_threads())
         self.declare_parameter("onnx_inter_threads", 1)
         self.declare_parameter("status_topic", "/status/intent_estimator/left_right")
         self.declare_parameter("status_hz", 10.0)

@@ -181,7 +181,7 @@ class SlidingWindowIntentModel:
         *,
         logger: Any,
         model_dir: Path,
-        onnx_intra_threads: int = 1,
+        onnx_intra_threads: int = default_onnx_intra_threads(),
         onnx_inter_threads: int = 1,
         sliding_window_ms: float = 300.0,
         sampling_hz: float = 200.0,
