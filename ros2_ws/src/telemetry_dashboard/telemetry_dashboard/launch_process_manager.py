@@ -73,6 +73,8 @@ def start_rosbag_recording() -> Tuple[bool, str]:
                 "/robot_description",
                 "/tf",
                 "/tf_static",
+                # "/odometry/filtered",
+                # "/locomotion_cmd"
             ],
             f"started rosbag recording to {bag_name}",
         )
