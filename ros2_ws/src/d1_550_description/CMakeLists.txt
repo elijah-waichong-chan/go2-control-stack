@@ -1,14 +1,18 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.8)
 
 project(d1_550_description)
 
-find_package(catkin REQUIRED)
+find_package(ament_cmake REQUIRED)
 
-catkin_package()
+foreach(dir config launch meshes textures urdf)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${dir}")
+    install(
+      DIRECTORY ${dir}/
+      DESTINATION share/${PROJECT_NAME}/${dir}
+    )
+  endif()
+endforeach()
 
-find_package(roslaunch)
+install(FILES package.xml DESTINATION share/${PROJECT_NAME})
 
-foreach(dir config launch meshes urdf)
-	install(DIRECTORY ${dir}/
-		DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/${dir})
-endforeach(dir)
+ament_package()
