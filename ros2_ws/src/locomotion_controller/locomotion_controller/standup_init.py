@@ -12,7 +12,7 @@ from rclpy.qos import (
     QoSProfile,
     QoSReliabilityPolicy,
 )
-from std_msgs.msg import Int32
+from go2_msgs.msg import LoopStatus
 from unitree_go.msg import LowCmd, LowState
 
 
@@ -155,6 +155,18 @@ def get_crc(msg: LowCmd) -> int:
     return crc32_core(words)
 
 
+def _make_loop_status(status_code: int) -> LoopStatus:
+    msg = LoopStatus()
+    msg.status = int(status_code)
+    msg.avg_loop_ms = -1.0
+    msg.p99_loop_ms = -1.0
+    msg.max_loop_ms = -1.0
+    msg.budget_ms = -1.0
+    msg.deadline_miss_count = -1
+    msg.sample_count = -1
+    return msg
+
+
 class StandUpInitNode(Node):
     STATUS_RUNNING = 1
     STATUS_WAITING_FOR_LOWSTATE = 2
@@ -217,9 +229,9 @@ class StandUpInitNode(Node):
         self.lowstate_sub = self.create_subscription(
             LowState, "/lowstate", self.on_lowstate, qos
         )
-        self.status_pub = self.create_publisher(Int32, "/status/standing_init", status_qos)
+        self.status_pub = self.create_publisher(LoopStatus, "/status/standing_init", status_qos)
         self.ctrl_status_sub = self.create_subscription(
-            Int32, "/status/loco_ctrl", self.on_ctrl_status, status_qos
+            LoopStatus, "/status/loco_ctrl", self.on_ctrl_status, status_qos
         )
 
         self.last_state: Optional[LowState] = None
@@ -241,7 +253,7 @@ class StandUpInitNode(Node):
         self.status_code = int(status_code)
 
     def on_status_timer(self) -> None:
-        self.status_pub.publish(Int32(data=int(self.status_code)))
+        self.status_pub.publish(_make_loop_status(self.status_code))
 
     def _request_shutdown(self, reason: str) -> None:
         if self.shutdown_requested:
@@ -335,8 +347,8 @@ class StandUpInitNode(Node):
         cmd.crc = get_crc(cmd)
         self.lowcmd_pub.publish(cmd)
 
-    def on_ctrl_status(self, msg: Int32) -> None:
-        if int(msg.data) != 1 or self.ctrl_running:
+    def on_ctrl_status(self, msg: LoopStatus) -> None:
+        if int(msg.status) != 1 or self.ctrl_running:
             return
         self.ctrl_running = True
         self._request_shutdown("locomotion_controller is running; stopping stand_up_init.")

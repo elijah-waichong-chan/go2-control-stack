@@ -14,7 +14,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 
-from go2_msgs.msg import ArmAngles, QDq
+from go2_msgs.msg import ArmAngles, LoopStatus, QDq
 from unitree_go.msg import LowCmd, LowState
 from std_msgs.msg import Bool, Int32
 from std_srvs.srv import Trigger
@@ -74,41 +74,41 @@ class TelemetryNode(Node):
         )
 
         self.create_subscription(
-            Int32,
+            LoopStatus,
             "/status/state_estimator",
-            lambda m: self.on_status_value("state_estimator", int(m.data)),
+            lambda m: self.on_loop_status("state_estimator", m),
             status_qos,
         )
         self.create_subscription(
-            Int32,
+            LoopStatus,
             "/status/loco_ctrl",
-            lambda m: self.on_status_value("loco_ctrl", int(m.data)),
+            lambda m: self.on_loop_status("loco_ctrl", m),
             status_qos,
         )
         self.create_subscription(
-            Int32,
+            LoopStatus,
             "/status/arm_parser",
-            lambda m: self.on_status_value("arm_parser", int(m.data)),
+            lambda m: self.on_loop_status("arm_parser", m),
             status_qos,
         )
         self.create_subscription(Bool, "/status/loco_ctrl/safety_stop",
                                  lambda m: self.on_status("safety_stop", m), status_qos)
         self.create_subscription(
-            Int32,
+            LoopStatus,
             "/status/standing_init",
-            lambda m: self.on_status_value("standing_init", int(m.data)),
+            lambda m: self.on_loop_status("standing_init", m),
             status_qos,
         )
         self.create_subscription(
-            Int32,
+            LoopStatus,
             "/status/intent_estimator/forward_backward",
-            lambda m: self.on_status_value("intent_estimator_forward_backward", int(m.data)),
+            lambda m: self.on_loop_status("intent_estimator_forward_backward", m),
             status_qos,
         )
         self.create_subscription(
-            Int32,
+            LoopStatus,
             "/status/intent_estimator/left_right",
-            lambda m: self.on_status_value("intent_estimator_left_right", int(m.data)),
+            lambda m: self.on_loop_status("intent_estimator_left_right", m),
             status_qos,
         )
         self._graph_thread = threading.Thread(
@@ -125,6 +125,20 @@ class TelemetryNode(Node):
     def on_status_value(self, name: str, value: object) -> None:
         with self._lock:
             self._status[name] = (value, time.monotonic())
+
+    def on_loop_status(self, name: str, msg: LoopStatus) -> None:
+        self.on_status_value(
+            name,
+            {
+                "status": int(msg.status),
+                "avg_loop_ms": float(msg.avg_loop_ms),
+                "p99_loop_ms": float(msg.p99_loop_ms),
+                "max_loop_ms": float(msg.max_loop_ms),
+                "budget_ms": float(msg.budget_ms),
+                "deadline_miss_count": int(msg.deadline_miss_count),
+                "sample_count": int(msg.sample_count),
+            },
+        )
 
     def on_qdq_est(self, msg: QDq) -> None:
         with self._lock:
@@ -254,8 +268,8 @@ def _get_intent_estimator_status(
     if fb is None and lr is None:
         return None
 
-    fb_status = int(fb) if fb is not None else None
-    lr_status = int(lr) if lr is not None else None
+    fb_status = _status_code(fb)
+    lr_status = _status_code(lr)
 
     if fb_status == 1 and lr_status == 1:
         return 1
@@ -274,6 +288,17 @@ def _get_intent_estimator_status(
     if lr_status == 2 and fb_status is None:
         return 8
     return 0
+
+
+def _status_code(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        raw = value.get("status")
+        if raw is None:
+            return None
+        return int(raw)
+    return int(value)
 
 
 def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
@@ -316,7 +341,10 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
                     st.success(f"{label}: OK")
             else:
                 if key == "standing_init":
-                    standing_status = int(val)
+                    standing_status = _status_code(val)
+                    if standing_status is None:
+                        st.error(f"{label}: invalid status")
+                        continue
                     if standing_status == 3:
                         st.success(f"{label}: complete (3)")
                     elif standing_status == 2:
@@ -326,7 +354,10 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
                     else:
                         st.error(f"{label}: idle ({int(val)})")
                 elif key == "arm_parser":
-                    arm_parser_status = int(val)
+                    arm_parser_status = _status_code(val)
+                    if arm_parser_status is None:
+                        st.error(f"{label}: invalid status")
+                        continue
                     if arm_parser_status == 1:
                         st.success(f"{label}: publishing (1)")
                     elif arm_parser_status == 2:
@@ -334,7 +365,10 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
                     else:
                         st.error(f"{label}: idle ({int(val)})")
                 elif key == "state_estimator":
-                    estimator_status = int(val)
+                    estimator_status = _status_code(val)
+                    if estimator_status is None:
+                        st.error(f"{label}: invalid status")
+                        continue
                     if estimator_status == 1:
                         st.success(f"{label}: running (1)")
                     elif estimator_status == 2:
@@ -342,7 +376,10 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
                     else:
                         st.error(f"{label}: idle ({int(val)})")
                 elif key == "rl_controller":
-                    loco_status = int(val)
+                    loco_status = _status_code(val)
+                    if loco_status is None:
+                        st.error(f"{label}: invalid status")
+                        continue
                     if loco_status == 1:
                         st.success(f"{label}: running (1)")
                     elif loco_status == 2:
@@ -352,7 +389,10 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
                     else:
                         st.error(f"{label}: idle (0)")
                 elif key == "intent_estimator":
-                    intent_status = int(val)
+                    intent_status = _status_code(val)
+                    if intent_status is None:
+                        st.error(f"{label}: invalid status")
+                        continue
                     if intent_status == 1:
                         st.success(f"{label}: running (1)")
                     elif intent_status == 2:
@@ -455,7 +495,7 @@ def _render_sidebar(node: TelemetryNode) -> None:
     )
     # Consider control stack active when the RL controller status stream is alive.
     locomotion_active = (
-        (rl_ctrl_status is not None)
+        (_status_code(rl_ctrl_status) is not None)
         or launch_process_manager.is_running("control_stack")
     )
     autonomy_active = launch_process_manager.is_running("autonomy")

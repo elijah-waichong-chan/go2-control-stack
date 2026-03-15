@@ -8,7 +8,7 @@ import time
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from go2_msgs.msg import QDq
+from go2_msgs.msg import QDq, LoopStatus
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -37,6 +37,18 @@ def _default_model_dir(bundle_name: str) -> Path:
             module_path.parents[3] / "src" / "direction_intent_estimator" / "config" / "models" / bundle_name,
         ]
     )
+
+
+def _make_loop_status(status_code: int) -> LoopStatus:
+    msg = LoopStatus()
+    msg.status = int(status_code)
+    msg.avg_loop_ms = -1.0
+    msg.p99_loop_ms = -1.0
+    msg.max_loop_ms = -1.0
+    msg.budget_ms = -1.0
+    msg.deadline_miss_count = -1
+    msg.sample_count = -1
+    return msg
 
 
 class ForwardBackwardIntentEstimatorNode(Node):
@@ -110,7 +122,7 @@ class ForwardBackwardIntentEstimatorNode(Node):
             QDq, self.qdq_topic, self.on_qdq, sensor_qos
         )
         self.pub_intent = self.create_publisher(Int32, self.output_topic, 10)
-        self.pub_status = self.create_publisher(Int32, self.status_topic, status_qos)
+        self.pub_status = self.create_publisher(LoopStatus, self.status_topic, status_qos)
         self.status_timer = self.create_timer(1.0 / max(1.0, self.status_hz), self.on_status_timer)
         self._update_status()
 
@@ -132,7 +144,7 @@ class ForwardBackwardIntentEstimatorNode(Node):
         self.status_code = int(status_code)
 
     def on_status_timer(self) -> None:
-        self.pub_status.publish(Int32(data=int(self.status_code)))
+        self.pub_status.publish(_make_loop_status(self.status_code))
 
     def _update_status(self) -> None:
         missing_topics = []

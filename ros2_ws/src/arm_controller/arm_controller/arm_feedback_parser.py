@@ -8,8 +8,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 
-from go2_msgs.msg import ArmAngles
-from std_msgs.msg import Int32
+from go2_msgs.msg import ArmAngles, LoopStatus
 from unitree_arm.msg import ArmString
 
 
@@ -38,6 +37,18 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _make_loop_status(status_code: int) -> LoopStatus:
+    msg = LoopStatus()
+    msg.status = int(status_code)
+    msg.avg_loop_ms = -1.0
+    msg.p99_loop_ms = -1.0
+    msg.max_loop_ms = -1.0
+    msg.budget_ms = -1.0
+    msg.deadline_miss_count = -1
+    msg.sample_count = -1
+    return msg
 
 
 class ArmFeedbackParser(Node):
@@ -72,7 +83,7 @@ class ArmFeedbackParser(Node):
             ArmString, feedback_topic, self.on_feedback, qos
         )
         self.pub_angles = self.create_publisher(ArmAngles, arm_angles_topic, qos)
-        self.pub_status = self.create_publisher(Int32, "/status/arm_parser", status_qos)
+        self.pub_status = self.create_publisher(LoopStatus, "/status/arm_parser", status_qos)
         self.status_code = self.STATUS_WAITING_FOR_FEEDBACK
         self.status_timer = self.create_timer(1.0 / status_hz, self.on_status_timer)
         self.get_logger().info(f"arm_feedback_parser running: {feedback_topic} -> {arm_angles_topic}")
@@ -81,7 +92,7 @@ class ArmFeedbackParser(Node):
         self.status_code = int(status_code)
 
     def on_status_timer(self) -> None:
-        self.pub_status.publish(Int32(data=int(self.status_code)))
+        self.pub_status.publish(_make_loop_status(self.status_code))
 
     def on_feedback(self, msg: ArmString) -> None:
         parsed = self._parse_payload(msg.data)

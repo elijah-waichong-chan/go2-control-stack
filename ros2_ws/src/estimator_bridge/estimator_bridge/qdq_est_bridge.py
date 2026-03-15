@@ -14,8 +14,7 @@ from rclpy.qos import (
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import JointState
 
-from go2_msgs.msg import QDq
-from std_msgs.msg import Int32
+from go2_msgs.msg import QDq, LoopStatus
 
 
 class QdqEstBridge(Node):
@@ -61,7 +60,7 @@ class QdqEstBridge(Node):
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.sub_standing = self.create_subscription(
-            Int32, "/status/standing_init", self.on_standing_status, status_qos
+            LoopStatus, "/status/standing_init", self.on_standing_status, status_qos
         )
 
 
@@ -74,8 +73,8 @@ class QdqEstBridge(Node):
         self._update_joint_index(msg.name)
         # Publish only on odom callbacks to keep a single stream rate.
 
-    def on_standing_status(self, msg: Int32) -> None:
-        self._standing_ready = int(msg.data) == 3
+    def on_standing_status(self, msg: LoopStatus) -> None:
+        self._standing_ready = int(msg.status) == 3
 
     def _update_joint_index(self, names: List[str]) -> None:
         if self._last_joint_names == list(names):

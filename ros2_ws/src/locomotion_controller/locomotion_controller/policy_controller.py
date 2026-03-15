@@ -11,7 +11,7 @@ import onnxruntime as ort
 import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
-from go2_msgs.msg import LocomotionCmd
+from go2_msgs.msg import LocomotionCmd, LoopStatus
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -19,7 +19,6 @@ from rclpy.qos import (
     QoSProfile,
     QoSReliabilityPolicy,
 )
-from std_msgs.msg import Int32
 from unitree_go.msg import LowCmd, LowState
 
 from locomotion_controller.standup_init import (
@@ -57,6 +56,18 @@ def _zeros_for_shape(shape: list[Any]) -> np.ndarray:
     return np.zeros(out_shape, dtype=np.float32)
 
 
+def _make_loop_status(status_code: int) -> LoopStatus:
+    msg = LoopStatus()
+    msg.status = int(status_code)
+    msg.avg_loop_ms = -1.0
+    msg.p99_loop_ms = -1.0
+    msg.max_loop_ms = -1.0
+    msg.budget_ms = -1.0
+    msg.deadline_miss_count = -1
+    msg.sample_count = -1
+    return msg
+
+
 class PolicyControllerNode(Node):
     STATUS_IDLE = 0
     STATUS_RUNNING = 1
@@ -74,6 +85,7 @@ class PolicyControllerNode(Node):
         self.lowstate_topic = "/lowstate"
         self.locomotion_cmd_topic = "/locomotion_cmd"
         self.lowcmd_topic = "/lowcmd"
+        self.status_topic = "/status/loco_ctrl"
 
         self.control_hz = 50.0          # Policy loop frequency
         self.control_period = 1.0 / max(self.control_hz, 1.0)
@@ -126,7 +138,7 @@ class PolicyControllerNode(Node):
         )
 
         self.pub_lowcmd = self.create_publisher(LowCmd, self.lowcmd_topic, command_qos)
-        self.pub_status = self.create_publisher(Int32, "/status/loco_ctrl", status_qos)
+        self.pub_status = self.create_publisher(LoopStatus, self.status_topic, status_qos)
         self._set_status(self.STATUS_IDLE)
 
         self.sub_lowstate = self.create_subscription(
@@ -136,7 +148,7 @@ class PolicyControllerNode(Node):
             LocomotionCmd, self.locomotion_cmd_topic, self.on_locomotion_cmd, sensor_qos
         )
         self.sub_standing = self.create_subscription(
-            Int32, "/status/standing_init", self.on_standing_status, status_qos
+            LoopStatus, "/status/standing_init", self.on_standing_status, status_qos
         )
 
         # ROS callback timer
@@ -144,7 +156,7 @@ class PolicyControllerNode(Node):
         self.status_timer = self.create_timer(1.0 / max(self.status_hz, 1.0), self.on_status_timer) # Status update loop
 
     def _publish_status(self) -> None:
-        self.pub_status.publish(Int32(data=int(self.status_code)))
+        self.pub_status.publish(_make_loop_status(self.status_code))
 
     def _set_status(self, status_code: int) -> None:
         status_code = int(status_code)
@@ -235,8 +247,8 @@ class PolicyControllerNode(Node):
         self.last_locomotion_cmd = msg
         self.last_cmd_time_ns = self.get_clock().now().nanoseconds
 
-    def on_standing_status(self, msg: Int32) -> None:
-        self.standing_ready = int(msg.data) == 3
+    def on_standing_status(self, msg: LoopStatus) -> None:
+        self.standing_ready = int(msg.status) == 3
 
     def on_timer(self) -> None:
         now_ns = self.get_clock().now().nanoseconds
