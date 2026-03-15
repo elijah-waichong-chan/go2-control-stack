@@ -56,15 +56,23 @@ def _zeros_for_shape(shape: list[Any]) -> np.ndarray:
     return np.zeros(out_shape, dtype=np.float32)
 
 
-def _make_loop_status(status_code: int) -> LoopStatus:
+def _make_loop_status(
+    status_code: int,
+    avg_loop_ms: float,
+    p99_loop_ms: float,
+    max_loop_ms: float,
+    budget_ms: float,
+    deadline_miss_count: int,
+    sample_count: int,
+) -> LoopStatus:
     msg = LoopStatus()
     msg.status = int(status_code)
-    msg.avg_loop_ms = -1.0
-    msg.p99_loop_ms = -1.0
-    msg.max_loop_ms = -1.0
-    msg.budget_ms = -1.0
-    msg.deadline_miss_count = -1
-    msg.sample_count = -1
+    msg.avg_loop_ms = float(avg_loop_ms)
+    msg.p99_loop_ms = float(p99_loop_ms)
+    msg.max_loop_ms = float(max_loop_ms)
+    msg.budget_ms = float(budget_ms)
+    msg.deadline_miss_count = int(deadline_miss_count)
+    msg.sample_count = int(sample_count)
     return msg
 
 
@@ -89,10 +97,12 @@ class PolicyControllerNode(Node):
 
         self.control_hz = 50.0          # Policy loop frequency
         self.control_period = 1.0 / max(self.control_hz, 1.0)
+        self.loop_budget_ms = self.control_period * 1000.0
 
         self.status_hz = 10.0           # Status topic publish rate in Hz.
         self.cmd_timeout_s = 0.5        # Zero commanded velocity if /locomotion_cmd is older than this.
         self.lowstate_timeout_s = 0.1   # Stop running policy if /lowstate is older than this.
+        self.loop_stats_window = max(100, int(self.control_hz * 10.0))
 
         self._load_action_cfg()
         self._load_observation_cfg()
@@ -111,6 +121,8 @@ class PolicyControllerNode(Node):
         self.running_logged = False
         self.motor_state_wait_logged = False
         self.status_code = -1
+        self.loop_times_ms: deque[float] = deque(maxlen=self.loop_stats_window)
+        self.deadline_flags: deque[int] = deque(maxlen=self.loop_stats_window)
 
         self.session, self.input_name, self.output_name = self._create_onnx_session(
             self.policy_dir / "exported" / "policy.onnx"
@@ -156,7 +168,20 @@ class PolicyControllerNode(Node):
         self.status_timer = self.create_timer(1.0 / max(self.status_hz, 1.0), self.on_status_timer) # Status update loop
 
     def _publish_status(self) -> None:
-        self.pub_status.publish(_make_loop_status(self.status_code))
+        avg_loop_ms, p99_loop_ms, max_loop_ms, deadline_miss_count, sample_count = (
+            self._get_loop_stats()
+        )
+        self.pub_status.publish(
+            _make_loop_status(
+                self.status_code,
+                avg_loop_ms,
+                p99_loop_ms,
+                max_loop_ms,
+                self.loop_budget_ms,
+                deadline_miss_count,
+                sample_count,
+            )
+        )
 
     def _set_status(self, status_code: int) -> None:
         status_code = int(status_code)
@@ -167,6 +192,22 @@ class PolicyControllerNode(Node):
 
     def on_status_timer(self) -> None:
         self._publish_status()
+
+    def _record_loop_time_ms(self, loop_time_ms: float) -> None:
+        self.loop_times_ms.append(float(loop_time_ms))
+        self.deadline_flags.append(1 if loop_time_ms > self.loop_budget_ms else 0)
+
+    def _get_loop_stats(self) -> tuple[float, float, float, int, int]:
+        if not self.loop_times_ms:
+            return -1.0, -1.0, -1.0, -1, -1
+
+        samples = np.asarray(self.loop_times_ms, dtype=np.float32)
+        avg_loop_ms = float(np.mean(samples))
+        p99_loop_ms = float(np.percentile(samples, 99.0))
+        max_loop_ms = float(np.max(samples))
+        deadline_miss_count = int(sum(self.deadline_flags))
+        sample_count = len(self.loop_times_ms)
+        return avg_loop_ms, p99_loop_ms, max_loop_ms, deadline_miss_count, sample_count
 
     def _load_deploy_cfg(self, path: Path) -> dict[str, Any]:
         if not path.exists():
@@ -251,56 +292,61 @@ class PolicyControllerNode(Node):
         self.standing_ready = int(msg.status) == 3
 
     def on_timer(self) -> None:
-        now_ns = self.get_clock().now().nanoseconds
-        if not self.standing_ready:
-            if not self.wait_logged:
-                self.get_logger().info("policy_controller waiting for /status/standing_init...")
-                self.wait_logged = True
-            self._set_status(self.STATUS_WAITING_FOR_STANDING_INIT)
-            return
-        if self.last_lowstate is None:
-            if not self.lowstate_wait_logged:
-                self.get_logger().info("policy_controller waiting for /lowstate...")
-                self.lowstate_wait_logged = True
-            self._set_status(self.STATUS_WAITING_FOR_LOWSTATE)
-            return
-        if self.last_lowstate_time_ns is None or (
-            self.lowstate_timeout_s > 0.0
-            and (now_ns - self.last_lowstate_time_ns) * 1e-9 > self.lowstate_timeout_s
-        ):
-            if not self.lowstate_stale_logged:
-                age_s = (
-                    float("inf")
-                    if self.last_lowstate_time_ns is None
-                    else (now_ns - self.last_lowstate_time_ns) * 1e-9
-                )
-                self.get_logger().warning(
-                    f"policy_controller waiting for fresh /lowstate "
-                    f"(age={age_s:.3f}s, timeout={self.lowstate_timeout_s:.3f}s)."
-                )
-                self.lowstate_stale_logged = True
-            self._set_status(self.STATUS_WAITING_FOR_LOWSTATE)
-            return
-        if len(self.last_lowstate.motor_state) <= max(self.joint_ids_map):
-            if not self.motor_state_wait_logged:
-                self.get_logger().warning("policy_controller waiting for full /lowstate motor_state.")
-                self.motor_state_wait_logged = True
-            self._set_status(self.STATUS_WAITING_FOR_LOWSTATE)
-            return
+        start_ns = time.perf_counter_ns()
+        try:
+            now_ns = self.get_clock().now().nanoseconds
+            if not self.standing_ready:
+                if not self.wait_logged:
+                    self.get_logger().info("policy_controller waiting for /status/standing_init...")
+                    self.wait_logged = True
+                self._set_status(self.STATUS_WAITING_FOR_STANDING_INIT)
+                return
+            if self.last_lowstate is None:
+                if not self.lowstate_wait_logged:
+                    self.get_logger().info("policy_controller waiting for /lowstate...")
+                    self.lowstate_wait_logged = True
+                self._set_status(self.STATUS_WAITING_FOR_LOWSTATE)
+                return
+            if self.last_lowstate_time_ns is None or (
+                self.lowstate_timeout_s > 0.0
+                and (now_ns - self.last_lowstate_time_ns) * 1e-9 > self.lowstate_timeout_s
+            ):
+                if not self.lowstate_stale_logged:
+                    age_s = (
+                        float("inf")
+                        if self.last_lowstate_time_ns is None
+                        else (now_ns - self.last_lowstate_time_ns) * 1e-9
+                    )
+                    self.get_logger().warning(
+                        f"policy_controller waiting for fresh /lowstate "
+                        f"(age={age_s:.3f}s, timeout={self.lowstate_timeout_s:.3f}s)."
+                    )
+                    self.lowstate_stale_logged = True
+                self._set_status(self.STATUS_WAITING_FOR_LOWSTATE)
+                return
+            if len(self.last_lowstate.motor_state) <= max(self.joint_ids_map):
+                if not self.motor_state_wait_logged:
+                    self.get_logger().warning("policy_controller waiting for full /lowstate motor_state.")
+                    self.motor_state_wait_logged = True
+                self._set_status(self.STATUS_WAITING_FOR_LOWSTATE)
+                return
 
-        obs = self._build_observation(self.last_lowstate)
-        raw_action = self._infer_policy(obs)
-        processed_action = self._process_action(raw_action)
-        cmd_msg = self._build_lowcmd(processed_action)
-        self.pub_lowcmd.publish(cmd_msg)
+            obs = self._build_observation(self.last_lowstate)
+            raw_action = self._infer_policy(obs)
+            processed_action = self._process_action(raw_action)
+            cmd_msg = self._build_lowcmd(processed_action)
+            self.pub_lowcmd.publish(cmd_msg)
 
-        self.last_raw_action = raw_action
-        if not self.ready_sent:
-            if not self.running_logged:
-                self.get_logger().info("policy_controller running")
-                self.running_logged = True
-            self.ready_sent = True
-        self._set_status(self.STATUS_RUNNING)
+            self.last_raw_action = raw_action
+            if not self.ready_sent:
+                if not self.running_logged:
+                    self.get_logger().info("policy_controller running")
+                    self.running_logged = True
+                self.ready_sent = True
+            self._set_status(self.STATUS_RUNNING)
+        finally:
+            loop_time_ms = (time.perf_counter_ns() - start_ns) / 1e6
+            self._record_loop_time_ms(loop_time_ms)
 
     def _compute_term(self, name: str, lowstate: LowState) -> np.ndarray:
         if name == "base_ang_vel":
