@@ -32,8 +32,6 @@ from locomotion_controller.standup_init import (
 )
 
 
-
-
 def _clamp(val: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, val))
 
@@ -217,12 +215,7 @@ class PolicyControllerNode(Node):
             raise RuntimeError(f"policy.onnx not found: {policy_path}")
         self.get_logger().info(f"Loading ONNX policy from {policy_path}")
         opts = ort.SessionOptions()
-        opts.intra_op_num_threads = 1
-        opts.inter_op_num_threads = 1
-        opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-        opts.enable_cpu_mem_arena = False
-        opts.enable_mem_pattern = False
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
         sess = ort.InferenceSession(
             str(policy_path),
             sess_options=opts,
