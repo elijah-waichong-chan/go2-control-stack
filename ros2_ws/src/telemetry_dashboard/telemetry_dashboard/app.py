@@ -16,8 +16,7 @@ from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 
 from go2_msgs.msg import ArmAngles, LoopStatus, QDq
 from unitree_go.msg import LowCmd, LowState
-from std_msgs.msg import Bool, Int32
-from std_srvs.srv import Trigger
+from std_msgs.msg import Int32
 from telemetry_dashboard import launch_process_manager
 
 
@@ -91,8 +90,6 @@ class TelemetryNode(Node):
             lambda m: self.on_loop_status("arm_parser", m),
             status_qos,
         )
-        self.create_subscription(Bool, "/status/loco_ctrl/safety_stop",
-                                 lambda m: self.on_status("safety_stop", m), status_qos)
         self.create_subscription(
             LoopStatus,
             "/status/standing_init",
@@ -117,10 +114,6 @@ class TelemetryNode(Node):
             daemon=True,
         )
         self._graph_thread.start()
-
-    def on_status(self, name: str, msg: Bool) -> None:
-        with self._lock:
-            self._status[name] = (bool(msg.data), time.monotonic())
 
     def on_status_value(self, name: str, value: object) -> None:
         with self._lock:
@@ -239,7 +232,6 @@ def get_ros_node() -> TelemetryNode:
         st.session_state["ros_node_name"] = f"telemetry_dashboard_{os.getpid()}_{uuid.uuid4().hex[:6]}"
 
     node = TelemetryNode(st.session_state["ros_node_name"])
-    st.session_state["svc_emergency_stop"] = node.create_client(Trigger, "/loco_ctrl/emergency_stop")
     executor = rclpy.executors.SingleThreadedExecutor()
     executor.add_node(node)
     thread = threading.Thread(target=executor.spin, daemon=True)
@@ -312,7 +304,6 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
         ("arm_parser", "Arm Parser"),
         ("rl_controller", "RL Controller"),
         ("intent_estimator", "Intent Estimator"),
-        ("safety_stop", "Safety Stop"),
     ]
 
     status_view = {
@@ -321,7 +312,6 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
         "arm_parser": _get_fresh_status(status_map, "arm_parser", now, timeout),
         "rl_controller": _get_fresh_status(status_map, "loco_ctrl", now, timeout),
         "intent_estimator": _get_intent_estimator_status(status_map, now, timeout),
-        "safety_stop": _get_fresh_status(status_map, "safety_stop", now, timeout),
     }
 
     cols = st.columns(len(labels))
@@ -329,92 +319,83 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
         with cols[idx]:
             val = status_view.get(key)
             if val is None:
-                if key == "safety_stop":
-                    st.success(f"{label}: OK")
-                else:
-                    st.error(f"{label}: not running")
+                st.error(f"{label}: not running")
                 continue
-            if key == "safety_stop":
-                if val:
-                    st.error(f"{label}: TRIGGERED")
+            if key == "standing_init":
+                standing_status = _status_code(val)
+                if standing_status is None:
+                    st.error(f"{label}: invalid status")
+                    continue
+                if standing_status == 3:
+                    st.success(f"{label}: complete (3)")
+                elif standing_status == 2:
+                    st.warning(f"{label}: waiting for /lowstate (2)")
+                elif standing_status == 1:
+                    st.info(f"{label}: running sequence (1)")
                 else:
-                    st.success(f"{label}: OK")
+                    st.error(f"{label}: idle ({int(val)})")
+            elif key == "arm_parser":
+                arm_parser_status = _status_code(val)
+                if arm_parser_status is None:
+                    st.error(f"{label}: invalid status")
+                    continue
+                if arm_parser_status == 1:
+                    st.success(f"{label}: publishing (1)")
+                elif arm_parser_status == 2:
+                    st.warning(f"{label}: waiting for /arm_Feedback (2)")
+                else:
+                    st.error(f"{label}: idle ({int(val)})")
+            elif key == "state_estimator":
+                estimator_status = _status_code(val)
+                if estimator_status is None:
+                    st.error(f"{label}: invalid status")
+                    continue
+                if estimator_status == 1:
+                    st.success(f"{label}: running (1)")
+                elif estimator_status == 2:
+                    st.warning(f"{label}: waiting for standing-init readiness (2)")
+                else:
+                    st.error(f"{label}: idle ({int(val)})")
+            elif key == "rl_controller":
+                loco_status = _status_code(val)
+                if loco_status is None:
+                    st.error(f"{label}: invalid status")
+                    continue
+                if loco_status == 1:
+                    st.success(f"{label}: running (1)")
+                elif loco_status == 2:
+                    st.warning(f"{label}: waiting for /lowstate (2)")
+                elif loco_status == 3:
+                    st.warning(f"{label}: waiting for standing-init readiness (3)")
+                else:
+                    st.error(f"{label}: idle (0)")
+            elif key == "intent_estimator":
+                intent_status = _status_code(val)
+                if intent_status is None:
+                    st.error(f"{label}: invalid status")
+                    continue
+                if intent_status == 1:
+                    st.success(f"{label}: running (1)")
+                elif intent_status == 2:
+                    st.warning(f"{label}: forward/backward waiting for topics (2)")
+                elif intent_status == 3:
+                    st.warning(f"{label}: left/right waiting for topics (3)")
+                elif intent_status == 4:
+                    st.warning(f"{label}: both nodes waiting for topics (4)")
+                elif intent_status == 5:
+                    st.warning(f"{label}: forward/backward running, left/right status missing (5)")
+                elif intent_status == 6:
+                    st.warning(f"{label}: left/right running, forward/backward status missing (6)")
+                elif intent_status == 7:
+                    st.warning(f"{label}: forward/backward waiting, left/right status missing (7)")
+                elif intent_status == 8:
+                    st.warning(f"{label}: left/right waiting, forward/backward status missing (8)")
+                else:
+                    st.error(f"{label}: idle ({int(val)})")
+            elif bool(val):
+                st.success(f"{label}: running")
             else:
-                if key == "standing_init":
-                    standing_status = _status_code(val)
-                    if standing_status is None:
-                        st.error(f"{label}: invalid status")
-                        continue
-                    if standing_status == 3:
-                        st.success(f"{label}: complete (3)")
-                    elif standing_status == 2:
-                        st.warning(f"{label}: waiting for /lowstate (2)")
-                    elif standing_status == 1:
-                        st.info(f"{label}: running sequence (1)")
-                    else:
-                        st.error(f"{label}: idle ({int(val)})")
-                elif key == "arm_parser":
-                    arm_parser_status = _status_code(val)
-                    if arm_parser_status is None:
-                        st.error(f"{label}: invalid status")
-                        continue
-                    if arm_parser_status == 1:
-                        st.success(f"{label}: publishing (1)")
-                    elif arm_parser_status == 2:
-                        st.warning(f"{label}: waiting for /arm_Feedback (2)")
-                    else:
-                        st.error(f"{label}: idle ({int(val)})")
-                elif key == "state_estimator":
-                    estimator_status = _status_code(val)
-                    if estimator_status is None:
-                        st.error(f"{label}: invalid status")
-                        continue
-                    if estimator_status == 1:
-                        st.success(f"{label}: running (1)")
-                    elif estimator_status == 2:
-                        st.warning(f"{label}: waiting for standing-init readiness (2)")
-                    else:
-                        st.error(f"{label}: idle ({int(val)})")
-                elif key == "rl_controller":
-                    loco_status = _status_code(val)
-                    if loco_status is None:
-                        st.error(f"{label}: invalid status")
-                        continue
-                    if loco_status == 1:
-                        st.success(f"{label}: running (1)")
-                    elif loco_status == 2:
-                        st.warning(f"{label}: waiting for /lowstate (2)")
-                    elif loco_status == 3:
-                        st.warning(f"{label}: waiting for standing-init readiness (3)")
-                    else:
-                        st.error(f"{label}: idle (0)")
-                elif key == "intent_estimator":
-                    intent_status = _status_code(val)
-                    if intent_status is None:
-                        st.error(f"{label}: invalid status")
-                        continue
-                    if intent_status == 1:
-                        st.success(f"{label}: running (1)")
-                    elif intent_status == 2:
-                        st.warning(f"{label}: forward/backward waiting for topics (2)")
-                    elif intent_status == 3:
-                        st.warning(f"{label}: left/right waiting for topics (3)")
-                    elif intent_status == 4:
-                        st.warning(f"{label}: both nodes waiting for topics (4)")
-                    elif intent_status == 5:
-                        st.warning(f"{label}: forward/backward running, left/right status missing (5)")
-                    elif intent_status == 6:
-                        st.warning(f"{label}: left/right running, forward/backward status missing (6)")
-                    elif intent_status == 7:
-                        st.warning(f"{label}: forward/backward waiting, left/right status missing (7)")
-                    elif intent_status == 8:
-                        st.warning(f"{label}: left/right waiting, forward/backward status missing (8)")
-                    else:
-                        st.error(f"{label}: idle ({int(val)})")
-                elif bool(val):
-                    st.success(f"{label}: running")
-                else:
-                    st.error(f"{label}: not running")
+                st.error(f"{label}: not running")
 
 
 def _style_sidebar_buttons(
@@ -470,7 +451,6 @@ def _style_sidebar_buttons(
       ok = styleBtn('{autonomy_label}', '{autonomy_bg}', '{autonomy_border}') && ok;
       ok = styleBtn('{foxglove_label}', '{foxglove_bg}', '{foxglove_border}') && ok;
       ok = styleBtn('{rosbag_label}', '{rosbag_bg}', '{rosbag_border}') && ok;
-      ok = styleBtn('EMERGENCY STOP', '{stop_red}', '{stop_border}') && ok;
       if (!ok) setTimeout(apply, 100);
     }};
     apply();
@@ -557,13 +537,6 @@ def _render_sidebar(node: TelemetryNode) -> None:
             st.info(msg)
         else:
             st.warning(msg)
-    if st.button("EMERGENCY STOP", key="emergency_stop", use_container_width=True):
-        client = st.session_state.get("svc_emergency_stop")
-        if client is None or not client.service_is_ready():
-            st.warning("Emergency stop service not available")
-        else:
-            client.call_async(Trigger.Request())
-            st.error("Emergency stop requested")
     _style_sidebar_buttons(
         locomotion_active,
         autonomy_active,
