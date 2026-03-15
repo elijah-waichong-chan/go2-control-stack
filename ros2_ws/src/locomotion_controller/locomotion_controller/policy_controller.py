@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import onnxruntime as ort
 import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
@@ -30,10 +31,7 @@ from locomotion_controller.standup_init import (
     get_crc,
 )
 
-try:
-    import onnxruntime as ort
-except ModuleNotFoundError:  # pragma: no cover - runtime check
-    ort = None
+
 
 
 def _clamp(val: float, lo: float, hi: float) -> float:
@@ -67,37 +65,25 @@ class PolicyControllerNode(Node):
     STATUS_WAITING_FOR_LOWSTATE = 2
     STATUS_WAITING_FOR_STANDING_INIT = 3
 
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__("policy_controller")
 
         share_dir = Path(get_package_share_directory("locomotion_controller"))
         default_policy_dir = share_dir / "config" / "policy_dir"
 
-        self.declare_parameter("policy_dir", str(default_policy_dir))
-        self.declare_parameter("lowstate_topic", "/lowstate")
-        self.declare_parameter("locomotion_cmd_topic", "/locomotion_cmd")
-        self.declare_parameter("lowcmd_topic", "/lowcmd")
-        self.declare_parameter("control_hz", 50.0)
-        self.declare_parameter("status_hz", 10.0)
-        self.declare_parameter("cmd_timeout_s", 0.5)
-        self.declare_parameter("lowstate_timeout_s", 0.1)
-        self.declare_parameter("require_standing_init", True)
-        self.declare_parameter("onnx_intra_threads", 1)
-        self.declare_parameter("onnx_inter_threads", 1)
-
-        self.policy_dir = Path(str(self.get_parameter("policy_dir").value)).expanduser()
-        self.lowstate_topic = str(self.get_parameter("lowstate_topic").value)
-        self.locomotion_cmd_topic = str(self.get_parameter("locomotion_cmd_topic").value)
-        self.lowcmd_topic = str(self.get_parameter("lowcmd_topic").value)
-        self.control_hz = float(self.get_parameter("control_hz").value)
-        self.status_hz = float(self.get_parameter("status_hz").value)
-        self.cmd_timeout_s = float(self.get_parameter("cmd_timeout_s").value)
-        self.lowstate_timeout_s = max(0.0, float(self.get_parameter("lowstate_timeout_s").value))
-        self.require_standing_init = bool(self.get_parameter("require_standing_init").value)
-        self.onnx_intra_threads = int(self.get_parameter("onnx_intra_threads").value)
-        self.onnx_inter_threads = int(self.get_parameter("onnx_inter_threads").value)
-
+        self.policy_dir = default_policy_dir.expanduser()
         self.deploy_cfg = self._load_deploy_cfg(self.policy_dir / "params" / "deploy.yaml")
+        self.lowstate_topic = "/lowstate"
+        self.locomotion_cmd_topic = "/locomotion_cmd"
+        self.lowcmd_topic = "/lowcmd"
+
+        self.control_hz = 50.0          # Policy loop frequency
+        self.control_period = 1.0 / max(self.control_hz, 1.0)
+
+        self.status_hz = 10.0           # Status topic publish rate in Hz.
+        self.cmd_timeout_s = 0.5        # Zero commanded velocity if /locomotion_cmd is older than this.
+        self.lowstate_timeout_s = 0.1   # Stop running policy if /lowstate is older than this.
+
         self._load_action_cfg()
         self._load_observation_cfg()
         self._load_command_ranges()
@@ -107,7 +93,7 @@ class PolicyControllerNode(Node):
         self.last_lowstate_time_ns: int | None = None
         self.last_locomotion_cmd: LocomotionCmd | None = None
         self.last_cmd_time_ns: int | None = None
-        self.standing_ready = not self.require_standing_init
+        self.standing_ready = False
         self.wait_logged = False
         self.lowstate_wait_logged = False
         self.lowstate_stale_logged = False
@@ -155,9 +141,9 @@ class PolicyControllerNode(Node):
             Int32, "/status/standing_init", self.on_standing_status, status_qos
         )
 
-        period = 1.0 / max(self.control_hz, 1.0)
-        self.timer = self.create_timer(period, self.on_timer)
-        self.status_timer = self.create_timer(1.0 / max(self.status_hz, 1.0), self.on_status_timer)
+        # ROS callback timer
+        self.timer = self.create_timer(self.control_period, self.on_timer)  # Policy loop
+        self.status_timer = self.create_timer(1.0 / max(self.status_hz, 1.0), self.on_status_timer) # Status update loop
 
     def _publish_status(self) -> None:
         self.pub_status.publish(Int32(data=int(self.status_code)))
@@ -204,8 +190,6 @@ class PolicyControllerNode(Node):
 
     def _load_observation_cfg(self) -> None:
         raw_obs_cfg = self.deploy_cfg.get("observations", {})
-        if not isinstance(raw_obs_cfg, dict):
-            raise RuntimeError("deploy.yaml observations must be a YAML mapping.")
 
         self.obs_terms: OrderedDict[str, dict[str, Any]] = OrderedDict()
         for name, cfg in raw_obs_cfg.items():
@@ -229,18 +213,13 @@ class PolicyControllerNode(Node):
         self.cmd_ang_z = tuple(ranges.get("ang_vel_z", [-1.0, 1.0]))
 
     def _create_onnx_session(self, policy_path: Path):
-        if ort is None:
-            raise RuntimeError(
-                "onnxruntime is required for policy inference. Install with: pip install onnxruntime"
-            )
         if not policy_path.exists():
             raise RuntimeError(f"policy.onnx not found: {policy_path}")
         self.get_logger().info(f"Loading ONNX policy from {policy_path}")
         opts = ort.SessionOptions()
-        opts.intra_op_num_threads = max(1, int(self.onnx_intra_threads))
-        opts.inter_op_num_threads = max(1, int(self.onnx_inter_threads))
+        opts.intra_op_num_threads = 1
+        opts.inter_op_num_threads = 1
         opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        # Prefer the most conservative runtime settings on embedded/container targets.
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
         opts.enable_cpu_mem_arena = False
         opts.enable_mem_pattern = False
@@ -251,12 +230,7 @@ class PolicyControllerNode(Node):
         )
         inputs = sess.get_inputs()
         outputs = sess.get_outputs()
-        if not inputs or not outputs:
-            raise RuntimeError("ONNX model has no inputs or outputs.")
-        self.get_logger().info(
-            f"Loaded ONNX policy input={inputs[0].name} shape={inputs[0].shape} "
-            f"output={outputs[0].name} shape={outputs[0].shape}"
-        )
+
         return sess, inputs[0].name, outputs[0].name
 
     def on_lowstate(self, msg: LowState) -> None:
@@ -269,12 +243,11 @@ class PolicyControllerNode(Node):
         self.last_cmd_time_ns = self.get_clock().now().nanoseconds
 
     def on_standing_status(self, msg: Int32) -> None:
-        if self.require_standing_init:
-            self.standing_ready = int(msg.data) == 3
+        self.standing_ready = int(msg.data) == 3
 
     def on_timer(self) -> None:
         now_ns = self.get_clock().now().nanoseconds
-        if self.require_standing_init and not self.standing_ready:
+        if not self.standing_ready:
             if not self.wait_logged:
                 self.get_logger().info("policy_controller waiting for /status/standing_init...")
                 self.wait_logged = True
@@ -455,8 +428,8 @@ class PolicyControllerNode(Node):
         return msg
 
 
-def main(args=None) -> None:
-    rclpy.init(args=args)
+def main():
+    rclpy.init()
     node = PolicyControllerNode()
     try:
         rclpy.spin(node)
