@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>go2_odometry</name>
+  <version>0.0.0</version>
+  <description>State estimation for Go2 robot mainly using invariant extended kalmann filters</description>
+  <maintainer email="earlaud@inria.fr">earlaud</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>go2_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>unitree_go</depend>
+  <depend>builtin_interfaces</depend>
+  <depend>inekf</depend>
+  <depend>tf2</depend>
+
+  <exec_depend>pinocchio</exec_depend>
+  <exec_depend>unitree_description</exec_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

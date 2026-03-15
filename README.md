@@ -31,10 +31,10 @@ git clone --recurse-submodules https://github.com/elijah-waichong-chan/go2-contr
 
 | Submodule Path | URL |
 | --- | --- |
-| `ros2_ws/src/go2_odometry` | `https://github.com/elijah-waichong-chan/go2_odometry.git` |
-| `ros2_ws/src/unitree_ros2` | `https://github.com/unitreerobotics/unitree_ros2` |
-| `ros2_ws/src/unitree_description` | `https://github.com/inria-paris-robotics-lab/unitree_description.git` |
-| `ros2_ws/src/inekf` | `https://github.com/elijah-waichong-chan/invariant-ekf.git` |
+| `ros2_ws/src/core/go2_odometry` | `https://github.com/elijah-waichong-chan/go2_odometry.git` |
+| `ros2_ws/src/vendor/unitree_ros2` | `https://github.com/unitreerobotics/unitree_ros2` |
+| `ros2_ws/src/descriptions/unitree_description` | `https://github.com/inria-paris-robotics-lab/unitree_description.git` |
+| `ros2_ws/src/vendor/inekf` | `https://github.com/elijah-waichong-chan/invariant-ekf.git` |
 
 ## Docker
 
@@ -117,7 +117,7 @@ ros2 bag record -s mcap -o "direction_estimator_bag_$(date +%Y%m%d_%H%M%S)" /dat
 | Package | Description |
 | --- | --- |
 | `arm_controller` | Parses `/arm_Feedback`, publishes `/arm_angles`, and exposes arm parser status. |
-| `direction_intent_estimator` | Direction intent estimation nodes using 1-D CNN models. |
+| `intent_estimator` | Direction intent estimation nodes using 1-D CNN models. |
 | `estimator_bridge` | Converts estimator outputs into the `/qdq_est` format used by this stack. |
 | `go2_msgs` | Custom ROS 2 message definitions used across the stack. |
 | `locomotion_controller` | Stand-up initialization, RL policy control, safety stop handling, and launch files. |
