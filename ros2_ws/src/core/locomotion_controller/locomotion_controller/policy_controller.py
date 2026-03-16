@@ -268,6 +268,8 @@ class PolicyControllerNode(Node):
             raise RuntimeError(f"policy.onnx not found: {policy_path}")
         self.get_logger().info(f"Loading ONNX policy from {policy_path}")
         opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 1
+        opts.inter_op_num_threads = 1
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
         sess = ort.InferenceSession(
             str(policy_path),
