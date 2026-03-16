@@ -50,10 +50,6 @@ class TelemetryNode(Node):
         self._topic_timestamps: Dict[str, Deque[float]] = {}
         self._topic_latest_msg: Dict[str, str] = {}
         self._node_names: list[str] = []
-        self._graph_topic_count = 0
-        self._graph_node_count = 0
-        self._system_stats: Dict[str, object] = {}
-        self._last_cpu_sample: tuple[int, int] | None = None
         self._topic_names = {
             "qdq_est": "/qdq_est",
             "odometry_filtered": "/odometry/filtered",
@@ -216,12 +212,10 @@ class TelemetryNode(Node):
             topics = self.get_topic_names_and_types()
             available = {name for name, _types in topics}
             with self._lock:
-                self._graph_topic_count = len(topics)
                 for _key, name in self._topic_names.items():
                     self._topic_available[name] = name in available
         except Exception:
             with self._lock:
-                self._graph_topic_count = 0
                 for _key, name in self._topic_names.items():
                     self._topic_available[name] = False
 
@@ -235,86 +229,16 @@ class TelemetryNode(Node):
                 else:
                     formatted.append(f"{namespace.rstrip('/')}/{name}")
             with self._lock:
-                self._graph_node_count = len(nodes)
                 self._node_names = sorted(formatted)
         except Exception:
             with self._lock:
-                self._graph_node_count = 0
                 self._node_names = []
-
-    def _update_system_stats(self) -> None:
-        stats: Dict[str, object] = {
-            "cpu_usage_percent": None,
-            "memory_usage_percent": None,
-            "memory_used_gb": None,
-            "memory_total_gb": None,
-        }
-
-        try:
-            with open("/proc/stat", "r", encoding="utf-8") as fh:
-                fields = fh.readline().split()
-            if fields and fields[0] == "cpu":
-                values = [int(v) for v in fields[1:]]
-                idle = values[3] + (values[4] if len(values) > 4 else 0)
-                total = sum(values)
-                previous = self._last_cpu_sample
-                self._last_cpu_sample = (total, idle)
-                if previous is not None:
-                    prev_total, prev_idle = previous
-                    total_delta = total - prev_total
-                    idle_delta = idle - prev_idle
-                    if total_delta > 0:
-                        stats["cpu_usage_percent"] = 100.0 * (
-                            1.0 - (idle_delta / float(total_delta))
-                        )
-        except OSError:
-            if hasattr(os, "getloadavg"):
-                try:
-                    load1, _load5, _load15 = os.getloadavg()
-                    cpu_count = max(os.cpu_count() or 1, 1)
-                    stats["cpu_usage_percent"] = 100.0 * (load1 / float(cpu_count))
-                except OSError:
-                    pass
-
-        try:
-            meminfo_kb: Dict[str, int] = {}
-            with open("/proc/meminfo", "r", encoding="utf-8") as fh:
-                for line in fh:
-                    key, value = line.split(":", 1)
-                    meminfo_kb[key] = int(value.strip().split()[0])
-            total_kb = meminfo_kb.get("MemTotal")
-            available_kb = meminfo_kb.get("MemAvailable")
-            if total_kb is not None and available_kb is not None and total_kb > 0:
-                used_kb = total_kb - available_kb
-                stats["memory_total_gb"] = total_kb / (1024.0 * 1024.0)
-                stats["memory_used_gb"] = used_kb / (1024.0 * 1024.0)
-                stats["memory_usage_percent"] = 100.0 * (used_kb / float(total_kb))
-        except OSError:
-            try:
-                page_size = os.sysconf("SC_PAGE_SIZE")
-                total_pages = os.sysconf("SC_PHYS_PAGES")
-                available_pages = os.sysconf("SC_AVPHYS_PAGES")
-                total_bytes = page_size * total_pages
-                available_bytes = page_size * available_pages
-                if total_bytes > 0:
-                    used_bytes = total_bytes - available_bytes
-                    stats["memory_total_gb"] = total_bytes / (1024.0**3)
-                    stats["memory_used_gb"] = used_bytes / (1024.0**3)
-                    stats["memory_usage_percent"] = 100.0 * (
-                        used_bytes / float(total_bytes)
-                    )
-            except (AttributeError, OSError, ValueError):
-                pass
-
-        with self._lock:
-            self._system_stats = stats
 
     def _graph_monitor_loop(self) -> None:
         poll_period_s = 1.0 / max(self.graph_poll_hz, 0.1)
         while not self._shutdown_event.wait(poll_period_s):
             self._update_topic_availability()
             self._update_node_list()
-            self._update_system_stats()
 
     def snapshot(self) -> Dict[str, object]:
         with self._lock:
@@ -326,9 +250,6 @@ class TelemetryNode(Node):
                 "topic_latest_msg": dict(self._topic_latest_msg),
                 "topic_names": dict(self._topic_names),
                 "node_names": list(self._node_names),
-                "graph_topic_count": self._graph_topic_count,
-                "graph_node_count": self._graph_node_count,
-                "system_stats": dict(self._system_stats),
                 "status_timeout_s": self.status_timeout_s,
             }
 
@@ -433,23 +354,6 @@ def _format_count(value: object) -> str:
     if value_i < 0:
         return "not recorded"
     return str(value_i)
-
-
-def _format_percent(value: object) -> str:
-    try:
-        value_f = float(value)
-    except (TypeError, ValueError):
-        return "not available"
-    return f"{value_f:.1f}%"
-
-
-def _format_gb_pair(used_value: object, total_value: object) -> str:
-    try:
-        used_gb = float(used_value)
-        total_gb = float(total_value)
-    except (TypeError, ValueError):
-        return "not available"
-    return f"{used_gb:.2f} / {total_gb:.2f} GB"
 
 
 def _module_summary(key: str, value: object) -> tuple[str, str]:
@@ -914,26 +818,6 @@ def _render_dashboard(node: TelemetryNode) -> None:
         st.code("\n".join(node_names), language="text")
     else:
         st.caption("No ROS nodes currently visible to the dashboard.")
-
-    st.subheader("Debug")
-    system_stats = snapshot.get("system_stats", {})
-    graph_topic_count = snapshot.get("graph_topic_count", 0)
-    graph_node_count = snapshot.get("graph_node_count", 0)
-    debug_col1, debug_col2, debug_col3, debug_col4 = st.columns(4)
-    with debug_col1:
-        st.metric("CPU Usage", _format_percent(system_stats.get("cpu_usage_percent")))
-    with debug_col2:
-        st.metric("RAM Usage", _format_percent(system_stats.get("memory_usage_percent")))
-    with debug_col3:
-        st.metric(
-            "RAM Used",
-            _format_gb_pair(
-                system_stats.get("memory_used_gb"),
-                system_stats.get("memory_total_gb"),
-            ),
-        )
-    with debug_col4:
-        st.metric("ROS Nodes / Topics", f"{graph_node_count} / {graph_topic_count}")
 
 
 if hasattr(st, "fragment"):
