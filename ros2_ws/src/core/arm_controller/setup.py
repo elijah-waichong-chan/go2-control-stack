@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'arm_feedback_parser = arm_controller.arm_feedback_parser:main',
+            'd1_ik_node = arm_controller.d1_ik_node:main',
         ],
     },
 )
