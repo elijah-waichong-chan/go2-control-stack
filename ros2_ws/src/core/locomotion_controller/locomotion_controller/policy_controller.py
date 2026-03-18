@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict, deque
 from pathlib import Path
+import time
 from typing import Any
 
 import numpy as np

@@ -49,7 +49,7 @@ def generate_launch_description():
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(go2_odom_launch),
-            launch_arguments={"run_inekf": enable_estimator}.items(),
+            condition=IfCondition(enable_estimator),
         ),
         Node(
             package='locomotion_controller',

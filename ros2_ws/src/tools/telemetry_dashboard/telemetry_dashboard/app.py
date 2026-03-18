@@ -4,11 +4,9 @@ from collections import deque
 import os
 import threading
 import time
-import uuid
 from typing import Deque, Dict, Tuple
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 import rclpy
 from rclpy.node import Node
@@ -17,10 +15,19 @@ from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 from go2_msgs.msg import ArmAngles, LocomotionCmd, LoopStatus, QDq
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import JointState
+from tf2_msgs.msg import TFMessage
 from unitree_go.msg import LowCmd, LowState
 from std_msgs.msg import Int32
 from unitree_arm.msg import ArmString
 from telemetry_dashboard import launch_process_manager
+
+
+_ROS_RUNTIME_LOCK = threading.Lock()
+_PRIMARY_ROS_NODE_NAME = f"telemetry_dashboard_{os.getpid()}"
+_ROS_RUNTIMES: Dict[
+    str,
+    Tuple["TelemetryNode", rclpy.executors.SingleThreadedExecutor, threading.Thread],
+] = {}
 
 
 class TelemetryNode(Node):
@@ -56,6 +63,8 @@ class TelemetryNode(Node):
             "locomotion_cmd": "/locomotion_cmd",
             "lowcmd": "/lowcmd",
             "joint_states": "/joint_states",
+            "tf": "/tf",
+            "tf_static": "/tf_static",
             "arm_angles": "/arm_angles",
             "arm_feedback": "/arm_Feedback",
             "intent_forward_backward": "/direction_intent/forward_backward",
@@ -73,6 +82,12 @@ class TelemetryNode(Node):
         self.create_subscription(LowCmd, self._topic_names["lowcmd"], self.on_lowcmd, qos)
         self.create_subscription(
             JointState, self._topic_names["joint_states"], self.on_joint_states, qos
+        )
+        self.create_subscription(
+            TFMessage, self._topic_names["tf"], self.on_tf, qos
+        )
+        self.create_subscription(
+            TFMessage, self._topic_names["tf_static"], self.on_tf_static, qos
         )
         self.create_subscription(ArmAngles, self._topic_names["arm_angles"], self.on_arm_angles, qos)
         self.create_subscription(
@@ -168,6 +183,12 @@ class TelemetryNode(Node):
     def on_joint_states(self, msg: JointState) -> None:
         self._mark_topic("joint_states")
 
+    def on_tf(self, msg: TFMessage) -> None:
+        self._mark_topic("tf")
+
+    def on_tf_static(self, msg: TFMessage) -> None:
+        self._mark_topic("tf_static")
+
     def on_arm_angles(self, msg: ArmAngles) -> None:
         self._mark_topic("arm_angles")
 
@@ -252,10 +273,68 @@ class TelemetryNode(Node):
         return super().destroy_node()
 
 
-def get_ros_node() -> TelemetryNode:
-    if "ros_node" in st.session_state:
-        return st.session_state["ros_node"]
+def _register_ros_runtime(
+    node_name: str,
+    node: "TelemetryNode",
+    executor: rclpy.executors.SingleThreadedExecutor,
+    thread: threading.Thread,
+) -> None:
+    with _ROS_RUNTIME_LOCK:
+        _ROS_RUNTIMES[node_name] = (node, executor, thread)
 
+
+def _get_registered_ros_runtime(
+    node_name: str,
+) -> Tuple["TelemetryNode", rclpy.executors.SingleThreadedExecutor, threading.Thread] | None:
+    with _ROS_RUNTIME_LOCK:
+        return _ROS_RUNTIMES.get(node_name)
+
+
+def _shutdown_ros_runtime(node_name: str) -> bool:
+    with _ROS_RUNTIME_LOCK:
+        runtime = _ROS_RUNTIMES.pop(node_name, None)
+
+    if runtime is None:
+        return False
+
+    node, executor, thread = runtime
+    try:
+        executor.shutdown(timeout_sec=1.0)
+    except TypeError:
+        executor.shutdown()
+    except Exception:
+        pass
+
+    try:
+        executor.remove_node(node)
+    except Exception:
+        pass
+
+    try:
+        node.destroy_node()
+    except Exception:
+        pass
+
+    if thread.is_alive():
+        thread.join(timeout=1.0)
+
+    return True
+
+
+def _shutdown_other_dashboard_nodes(current_node_name: str) -> int:
+    with _ROS_RUNTIME_LOCK:
+        other_node_names = [
+            node_name for node_name in _ROS_RUNTIMES if node_name != current_node_name
+        ]
+
+    stopped = 0
+    for node_name in other_node_names:
+        if _shutdown_ros_runtime(node_name):
+            stopped += 1
+    return stopped
+
+
+def get_ros_node() -> TelemetryNode:
     try:
         if not rclpy.ok():
             rclpy.init(args=None)
@@ -263,14 +342,22 @@ def get_ros_node() -> TelemetryNode:
         # rclpy may already be initialized in this process
         pass
 
-    if "ros_node_name" not in st.session_state:
-        st.session_state["ros_node_name"] = f"telemetry_dashboard_{os.getpid()}_{uuid.uuid4().hex[:6]}"
+    node_name = _PRIMARY_ROS_NODE_NAME
+    st.session_state["ros_node_name"] = node_name
+    runtime = _get_registered_ros_runtime(node_name)
+    if runtime is not None:
+        node, executor, thread = runtime
+        st.session_state["ros_executor"] = executor
+        st.session_state["ros_spin_thread"] = thread
+        st.session_state["ros_node"] = node
+        return node
 
-    node = TelemetryNode(st.session_state["ros_node_name"])
+    node = TelemetryNode(node_name)
     executor = rclpy.executors.SingleThreadedExecutor()
     executor.add_node(node)
     thread = threading.Thread(target=executor.spin, daemon=True)
     thread.start()
+    _register_ros_runtime(node_name, node, executor, thread)
     st.session_state["ros_executor"] = executor
     st.session_state["ros_spin_thread"] = thread
     st.session_state["ros_node"] = node
@@ -528,74 +615,78 @@ def _style_sidebar_buttons(
     autonomy_active: bool,
     foxglove_active: bool,
     rosbag_active: bool,
-    arm_controller_active: bool,
+    state_converter_active: bool,
 ) -> None:
     start_green = "#2ecc71"
     start_border = "#27ae60"
     stop_red = "#e74c3c"
     stop_border = "#c0392b"
-    control_label = (
-        "Stop Control Stack" if locomotion_active else "Start Control Stack"
-    )
-    control_bg = stop_red if locomotion_active else start_green
-    control_border = stop_border if locomotion_active else start_border
-    autonomy_label = "Stop Autonomy" if autonomy_active else "Start Autonomy"
-    autonomy_bg = stop_red if autonomy_active else start_green
-    autonomy_border = stop_border if autonomy_active else start_border
-    foxglove_label = (
-        "Stop Foxglove Bridge"
-        if foxglove_active
-        else "Start Foxglove Bridge"
-    )
-    foxglove_bg = stop_red if foxglove_active else start_green
-    foxglove_border = stop_border if foxglove_active else start_border
-    rosbag_label = (
-        "Stop Rosbag Recording"
-        if rosbag_active
-        else "Start Rosbag Recording"
-    )
-    rosbag_bg = stop_red if rosbag_active else start_green
-    rosbag_border = stop_border if rosbag_active else start_border
-    arm_controller_label = (
-        "Stop Arm Controller" if arm_controller_active else "Start Arm Controller"
-    )
-    arm_controller_bg = stop_red if arm_controller_active else start_green
-    arm_controller_border = stop_border if arm_controller_active else start_border
-    js = f"""
-    <script>
-    const styleBtn = (label, bg, border) => {{
-      const btns = Array.from(window.parent.document.querySelectorAll('button'));
-      const btn = btns.find(b => b.innerText.trim() === label);
-      if (!btn) return false;
-      btn.disabled = false;
-      btn.style.setProperty('background-color', bg, 'important');
-      btn.style.setProperty('color', '#ffffff', 'important');
-      btn.style.setProperty('border', '1px solid ' + border, 'important');
-      btn.style.setProperty('opacity', '1.0', 'important');
-      btn.style.setProperty('cursor', 'pointer', 'important');
-      return true;
-    }};
+    danger_bg = "#c0392b"
+    danger_border = "#922b21"
 
-    const apply = () => {{
-      let ok = true;
-      ok = styleBtn('{control_label}', '{control_bg}', '{control_border}') && ok;
-      ok = styleBtn('{autonomy_label}', '{autonomy_bg}', '{autonomy_border}') && ok;
-      ok = styleBtn('{foxglove_label}', '{foxglove_bg}', '{foxglove_border}') && ok;
-      ok = styleBtn('{rosbag_label}', '{rosbag_bg}', '{rosbag_border}') && ok;
-      ok = styleBtn('{arm_controller_label}', '{arm_controller_bg}', '{arm_controller_border}') && ok;
-      if (!ok) setTimeout(apply, 100);
-    }};
-    apply();
-    if (!window._dashBtnInterval) {{
-      window._dashBtnInterval = setInterval(apply, 500);
-    }}
-    </script>
-    """
-    components.html(js, height=0)
+    button_styles = [
+        (stop_red if locomotion_active else start_green, stop_border if locomotion_active else start_border),
+        (stop_red if autonomy_active else start_green, stop_border if autonomy_active else start_border),
+        (stop_red if foxglove_active else start_green, stop_border if foxglove_active else start_border),
+        (stop_red if rosbag_active else start_green, stop_border if rosbag_active else start_border),
+        (stop_red if state_converter_active else start_green, stop_border if state_converter_active else start_border),
+        (danger_bg, danger_border),
+    ]
+
+    css_rules: list[str] = []
+    for idx, (bg, border) in enumerate(button_styles, start=1):
+        css_rules.append(
+            f"""
+            [data-testid="stSidebar"] [data-testid="stButton"]:nth-of-type({idx}) button {{
+                background-color: {bg};
+                color: #ffffff;
+                border: 1px solid {border};
+            }}
+            [data-testid="stSidebar"] [data-testid="stButton"]:nth-of-type({idx}) button:hover {{
+                background-color: {bg};
+                color: #ffffff;
+                border: 1px solid {border};
+                filter: brightness(0.96);
+            }}
+            [data-testid="stSidebar"] [data-testid="stButton"]:nth-of-type({idx}) button:focus,
+            [data-testid="stSidebar"] [data-testid="stButton"]:nth-of-type({idx}) button:focus-visible {{
+                background-color: {bg};
+                color: #ffffff;
+                border: 1px solid {border};
+                box-shadow: 0 0 0 0.2rem rgba(255, 255, 255, 0.12);
+            }}
+            """
+        )
+
+    css_rules.append(
+        f"""
+        [data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"] {{
+            background-color: {stop_red};
+            color: #ffffff;
+            border: 1px solid {stop_border};
+        }}
+        [data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"]:hover {{
+            background-color: {stop_red};
+            color: #ffffff;
+            border: 1px solid {stop_border};
+            filter: brightness(0.96);
+        }}
+        [data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"]:focus,
+        [data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"]:focus-visible {{
+            background-color: {stop_red};
+            color: #ffffff;
+            border: 1px solid {stop_border};
+            box-shadow: 0 0 0 0.2rem rgba(255, 255, 255, 0.12);
+        }}
+        """
+    )
+
+    st.markdown(f"<style>{''.join(css_rules)}</style>", unsafe_allow_html=True)
 
 
 def _render_sidebar(node: TelemetryNode) -> None:
     snapshot = node.snapshot()
+    current_node_name = st.session_state.get("ros_node_name", node.get_name())
 
     st.header("Settings")
     status_map = snapshot["status"]
@@ -613,19 +704,26 @@ def _render_sidebar(node: TelemetryNode) -> None:
     autonomy_active = launch_process_manager.is_running("autonomy")
     foxglove_active = launch_process_manager.is_running("foxglove_bridge")
     rosbag_active = launch_process_manager.is_running("rosbag_recording")
-    arm_controller_active = launch_process_manager.is_running("arm_controller")
+    state_converter_active = (
+        launch_process_manager.is_running("state_converter_stack")
+        or launch_process_manager.is_running("arm_controller")
+    )
     control_label = (
         "Stop Control Stack" if locomotion_active else "Start Control Stack"
     )
     enable_estimator = st.session_state.get("ctrl_enable_estimator", True)
     enable_wireless_cmd_bridge = st.session_state.get("ctrl_enable_wireless_cmd_bridge", True)
-    enable_arm_parser = st.session_state.get("ctrl_enable_arm_parser", True)
     enable_forward_backward_estimator = st.session_state.get(
         "ctrl_enable_forward_backward_estimator", True
     )
     enable_left_right_estimator = st.session_state.get("ctrl_enable_left_right_estimator", True)
 
-    if st.button(control_label, key="toggle_ctrl", use_container_width=True):
+    if st.button(
+        control_label,
+        key="toggle_ctrl",
+        use_container_width=True,
+        type="primary" if locomotion_active else "secondary",
+    ):
         if locomotion_active:
             ok, msg = launch_process_manager.stop_launch("control_stack")
         else:
@@ -635,7 +733,7 @@ def _render_sidebar(node: TelemetryNode) -> None:
                 "control_stack.launch.py",
                 launch_args={
                     "enable_estimator": str(enable_estimator).lower(),
-                    "enable_arm_parser": str(enable_arm_parser).lower(),
+                    "enable_arm_parser": "false",
                     "enable_wireless_cmd_bridge": str(enable_wireless_cmd_bridge).lower(),
                     "enable_forward_backward_estimator": str(enable_forward_backward_estimator).lower(),
                     "enable_left_right_estimator": str(enable_left_right_estimator).lower(),
@@ -657,11 +755,6 @@ def _render_sidebar(node: TelemetryNode) -> None:
             value=enable_wireless_cmd_bridge,
             key="ctrl_enable_wireless_cmd_bridge",
         )
-        enable_arm_parser = st.checkbox(
-            "Arm Parser",
-            value=enable_arm_parser,
-            key="ctrl_enable_arm_parser",
-        )
         enable_forward_backward_estimator = st.checkbox(
             "Forward/Backward Estimator",
             value=enable_forward_backward_estimator,
@@ -673,7 +766,12 @@ def _render_sidebar(node: TelemetryNode) -> None:
             key="ctrl_enable_left_right_estimator",
         )
     autonomy_label = "Stop Autonomy" if autonomy_active else "Start Autonomy"
-    if st.button(autonomy_label, key="toggle_autonomy", use_container_width=True):
+    if st.button(
+        autonomy_label,
+        key="toggle_autonomy",
+        use_container_width=True,
+        type="primary" if autonomy_active else "secondary",
+    ):
         if autonomy_active:
             ok, msg = launch_process_manager.stop_launch("autonomy")
         else:
@@ -689,7 +787,12 @@ def _render_sidebar(node: TelemetryNode) -> None:
         if foxglove_active
         else "Start Foxglove Bridge"
     )
-    if st.button(foxglove_label, key="toggle_foxglove", use_container_width=True):
+    if st.button(
+        foxglove_label,
+        key="toggle_foxglove",
+        use_container_width=True,
+        type="primary" if foxglove_active else "secondary",
+    ):
         if foxglove_active:
             ok, msg = launch_process_manager.stop_launch("foxglove_bridge")
         else:
@@ -705,7 +808,12 @@ def _render_sidebar(node: TelemetryNode) -> None:
         if rosbag_active
         else "Start Rosbag Recording"
     )
-    if st.button(rosbag_label, key="toggle_rosbag", use_container_width=True):
+    if st.button(
+        rosbag_label,
+        key="toggle_rosbag",
+        use_container_width=True,
+        type="primary" if rosbag_active else "secondary",
+    ):
         if rosbag_active:
             ok, msg = launch_process_manager.stop_launch("rosbag_recording")
         else:
@@ -714,15 +822,44 @@ def _render_sidebar(node: TelemetryNode) -> None:
             st.info(msg)
         else:
             st.warning(msg)
-    arm_controller_label = (
-        "Stop Arm Controller" if arm_controller_active else "Start Arm Controller"
+    state_converter_label = (
+        "Stop State Converter" if state_converter_active else "Start State Converter"
     )
-    if st.button(arm_controller_label, key="toggle_arm_controller", use_container_width=True):
-        if arm_controller_active:
-            ok, msg = launch_process_manager.stop_launch("arm_controller")
+    if st.button(
+        state_converter_label,
+        key="toggle_state_converter",
+        use_container_width=True,
+        type="primary" if state_converter_active else "secondary",
+    ):
+        if state_converter_active:
+            ok, msg = launch_process_manager.stop_state_converter_stack()
         else:
-            ok, msg = launch_process_manager.start_node(
-                "arm_controller", "arm_controller", "d1_ik_node"
+            ok, msg = launch_process_manager.start_state_converter_stack()
+        if ok:
+            st.info(msg)
+        else:
+            st.warning(msg)
+    st.caption("Danger zone")
+    if st.button(
+        "Destroy Other ROS Nodes",
+        key="destroy_other_ros_nodes",
+        use_container_width=True,
+    ):
+        other_dashboard_nodes = _shutdown_other_dashboard_nodes(current_node_name)
+        visible_other_nodes = [
+            name
+            for name in snapshot.get("node_names", [])
+            if name.lstrip("/") != current_node_name
+        ]
+        launch_process_manager.stop_all()
+        ok, msg = launch_process_manager.stop_ros_nodes(
+            visible_other_nodes,
+            exclude_pids=[os.getpid()],
+        )
+        if other_dashboard_nodes:
+            msg = (
+                f"destroyed {other_dashboard_nodes} extra dashboard node(s); "
+                + msg
             )
         if ok:
             st.info(msg)
@@ -733,7 +870,7 @@ def _render_sidebar(node: TelemetryNode) -> None:
         autonomy_active,
         foxglove_active,
         rosbag_active,
-        arm_controller_active,
+        state_converter_active,
     )
 
 
@@ -767,6 +904,8 @@ def _render_dashboard(node: TelemetryNode) -> None:
             [
                 ("odometry_filtered", "odometry_filtered"),
                 ("joint_states", "joint_states"),
+                ("tf", "tf"),
+                ("tf_static", "tf_static"),
                 ("qdq_est", "qdq_est"),
             ],
         ),
@@ -836,8 +975,8 @@ def _render_dashboard(node: TelemetryNode) -> None:
 
 
 if hasattr(st, "fragment"):
-    _render_sidebar = st.fragment(run_every="1s")(_render_sidebar)
-    _render_dashboard = st.fragment(run_every="1s")(_render_dashboard)
+    _render_sidebar = st.fragment(run_every="2s")(_render_sidebar)
+    _render_dashboard = st.fragment(run_every="2s")(_render_dashboard)
 
 
 def main() -> None:

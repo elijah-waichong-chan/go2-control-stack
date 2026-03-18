@@ -25,8 +25,8 @@ public:
         "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
     })
     , arm_joint_names_({
-        "Joint1", "Joint2", "Joint3", "Joint4",
-        "Joint5", "Joint6", "Joint7_1", "Joint7_2",
+        "d1_Joint1", "d1_Joint2", "d1_Joint3", "d1_Joint4",
+        "d1_Joint5", "d1_Joint6", "d1_Joint7_1", "d1_Joint7_2",
     })
     , leg_to_sdk_index_({
         3,  4,  5,
@@ -88,18 +88,21 @@ private:
   std::array<double, 8> arm_joint_positions_;
   std::array<double, 8> arm_joint_velocities_;
   std::array<double, 8> arm_joint_efforts_;
+
+  static constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
 };
 
 void StateConverterNode::arm_angles_callback(const go2_msgs::msg::ArmAngles::SharedPtr msg)
 {
   for (size_t i = 0; i < nq_arm_msg; ++i)
   {
-    arm_joint_positions_[i] = static_cast<double>(msg->angle_deg[i]);
+    const double angle_rad = static_cast<double>(msg->angle_deg[i]) * kDegToRad;
+    arm_joint_positions_[i] = (i == 0) ? -angle_rad : angle_rad;
   }
 
   // The arm feedback exposes one finger angle. Mirror it into the opposing prismatic joint
   // so downstream consumers can see the full gripper state if they care to.
-  arm_joint_positions_[6] = static_cast<double>(msg->angle_deg[6]);
+  arm_joint_positions_[6] = static_cast<double>(msg->angle_deg[6]) * kDegToRad;
   arm_joint_positions_[7] = -arm_joint_positions_[6];
 }
 

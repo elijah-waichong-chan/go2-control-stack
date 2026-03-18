@@ -1,12 +1,20 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from unitree_description import GO2_DESCRIPTION_URDF_PATH
+from ament_index_python.packages import get_package_share_directory
+import os
+import xacro
 
 
 def generate_launch_description():
-    # Read go2 urdf from unitree_description
-    with open(GO2_DESCRIPTION_URDF_PATH, "r") as info:
-        robot_desc = info.read()
+    combined_xacro_path = os.path.join(
+        get_package_share_directory("go2_d1_integration"),
+        "urdf",
+        "go2_d1_combined.xacro",
+    )
+    robot_desc = xacro.process_file(
+        combined_xacro_path,
+        mappings={"include_fingers": "false"},
+    ).toxml()
 
     return LaunchDescription(
         [
@@ -16,7 +24,7 @@ def generate_launch_description():
                 name="robot_state_publisher",
                 output="screen",
                 parameters=[{"robot_description": robot_desc}],
-                arguments=[GO2_DESCRIPTION_URDF_PATH],
+                arguments=[combined_xacro_path],
                 ros_arguments=[
                     "--log-level", "robot_state_publisher:=warn",
                     "--log-level", "kdl_parser:=error",
