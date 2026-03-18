@@ -58,6 +58,23 @@ def start_launch(
         )
 
 
+def start_node(
+    name: str,
+    package: str,
+    executable: str,
+    ros_args: Sequence[str] | None = None,
+) -> Tuple[bool, str]:
+    with _LOCK:
+        command = ["ros2", "run", package, executable]
+        if ros_args:
+            command.extend(ros_args)
+        return _start_process(
+            name,
+            command,
+            f"started {package} {executable}",
+        )
+
+
 def start_rosbag_recording() -> Tuple[bool, str]:
     with _LOCK:
         bag_name = time.strftime("go2_data_%Y%m%d_%H%M%S")
@@ -124,5 +141,6 @@ def stop_all() -> None:
         "autonomy",
         "foxglove_bridge",
         "rosbag_recording",
+        "arm_controller",
     ):
         stop_launch(name)

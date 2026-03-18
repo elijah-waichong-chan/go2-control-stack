@@ -43,7 +43,6 @@ class TelemetryNode(Node):
         )
 
         self._lock = threading.Lock()
-        self._shutdown_event = threading.Event()
 
         self._status: Dict[str, Tuple[object, float]] = {}
         self._topic_available: Dict[str, bool] = {}
@@ -128,12 +127,10 @@ class TelemetryNode(Node):
             lambda m: self.on_loop_status("intent_estimator_left_right", m),
             status_qos,
         )
-        self._graph_thread = threading.Thread(
-            target=self._graph_monitor_loop,
-            name=f"{node_name}_graph_monitor",
-            daemon=True,
+        self._graph_timer = self.create_timer(
+            1.0 / max(self.graph_poll_hz, 0.1),
+            self._on_graph_timer,
         )
-        self._graph_thread.start()
 
     def on_status_value(self, name: str, value: object) -> None:
         with self._lock:
@@ -234,11 +231,9 @@ class TelemetryNode(Node):
             with self._lock:
                 self._node_names = []
 
-    def _graph_monitor_loop(self) -> None:
-        poll_period_s = 1.0 / max(self.graph_poll_hz, 0.1)
-        while not self._shutdown_event.wait(poll_period_s):
-            self._update_topic_availability()
-            self._update_node_list()
+    def _on_graph_timer(self) -> None:
+        self._update_topic_availability()
+        self._update_node_list()
 
     def snapshot(self) -> Dict[str, object]:
         with self._lock:
@@ -254,9 +249,6 @@ class TelemetryNode(Node):
             }
 
     def destroy_node(self) -> bool:
-        self._shutdown_event.set()
-        if self._graph_thread.is_alive():
-            self._graph_thread.join(timeout=1.0)
         return super().destroy_node()
 
 
@@ -536,6 +528,7 @@ def _style_sidebar_buttons(
     autonomy_active: bool,
     foxglove_active: bool,
     rosbag_active: bool,
+    arm_controller_active: bool,
 ) -> None:
     start_green = "#2ecc71"
     start_border = "#27ae60"
@@ -563,6 +556,11 @@ def _style_sidebar_buttons(
     )
     rosbag_bg = stop_red if rosbag_active else start_green
     rosbag_border = stop_border if rosbag_active else start_border
+    arm_controller_label = (
+        "Stop Arm Controller" if arm_controller_active else "Start Arm Controller"
+    )
+    arm_controller_bg = stop_red if arm_controller_active else start_green
+    arm_controller_border = stop_border if arm_controller_active else start_border
     js = f"""
     <script>
     const styleBtn = (label, bg, border) => {{
@@ -584,6 +582,7 @@ def _style_sidebar_buttons(
       ok = styleBtn('{autonomy_label}', '{autonomy_bg}', '{autonomy_border}') && ok;
       ok = styleBtn('{foxglove_label}', '{foxglove_bg}', '{foxglove_border}') && ok;
       ok = styleBtn('{rosbag_label}', '{rosbag_bg}', '{rosbag_border}') && ok;
+      ok = styleBtn('{arm_controller_label}', '{arm_controller_bg}', '{arm_controller_border}') && ok;
       if (!ok) setTimeout(apply, 100);
     }};
     apply();
@@ -614,6 +613,7 @@ def _render_sidebar(node: TelemetryNode) -> None:
     autonomy_active = launch_process_manager.is_running("autonomy")
     foxglove_active = launch_process_manager.is_running("foxglove_bridge")
     rosbag_active = launch_process_manager.is_running("rosbag_recording")
+    arm_controller_active = launch_process_manager.is_running("arm_controller")
     control_label = (
         "Stop Control Stack" if locomotion_active else "Start Control Stack"
     )
@@ -714,11 +714,26 @@ def _render_sidebar(node: TelemetryNode) -> None:
             st.info(msg)
         else:
             st.warning(msg)
+    arm_controller_label = (
+        "Stop Arm Controller" if arm_controller_active else "Start Arm Controller"
+    )
+    if st.button(arm_controller_label, key="toggle_arm_controller", use_container_width=True):
+        if arm_controller_active:
+            ok, msg = launch_process_manager.stop_launch("arm_controller")
+        else:
+            ok, msg = launch_process_manager.start_node(
+                "arm_controller", "arm_controller", "d1_ik_node"
+            )
+        if ok:
+            st.info(msg)
+        else:
+            st.warning(msg)
     _style_sidebar_buttons(
         locomotion_active,
         autonomy_active,
         foxglove_active,
         rosbag_active,
+        arm_controller_active,
     )
 
 
