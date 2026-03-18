@@ -221,8 +221,8 @@ class SlidingWindowIntentModel:
     ):
         """Create an ONNX Runtime session and reconcile tensor names."""
         opts = ort.SessionOptions()
-        opts.intra_op_num_threads = max(1, int(onnx_intra_threads))
-        opts.inter_op_num_threads = max(1, int(onnx_inter_threads))
+        opts.intra_op_num_threads = 1
+        opts.inter_op_num_threads = 1
         opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         session = ort.InferenceSession(
             str(model_path),
