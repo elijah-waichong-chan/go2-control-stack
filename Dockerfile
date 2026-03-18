@@ -47,4 +47,4 @@ RUN git config --global --add safe.directory /home/go2-control-stack/ros2_ws/fox
 ENV PIP_DEFAULT_TIMEOUT=120 \
     PIP_RETRIES=10
 
-RUN python3 -m pip install --no-cache-dir --prefer-binary --ignore-installed streamlit onnxruntime==1.18.1 "numpy<2"
+RUN python3 -m pip install --no-cache-dir --prefer-binary --ignore-installed streamlit onnxruntime==1.18.1 "numpy<2" casadi
