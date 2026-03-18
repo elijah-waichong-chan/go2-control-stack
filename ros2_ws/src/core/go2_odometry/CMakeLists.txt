@@ -23,7 +23,7 @@ find_package(rosidl_default_generators REQUIRED)
 unset(PYTHON_SOABI)
 
 add_executable(state_converter_node src/go2_state_converter_node.cpp)
-ament_target_dependencies(state_converter_node rclcpp unitree_go sensor_msgs)
+ament_target_dependencies(state_converter_node rclcpp unitree_go sensor_msgs go2_msgs)
 
 install(TARGETS
   state_converter_node
