@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
-  <xacro:macro name="d1_prefixed" params="prefix:='d1_'">
+  <xacro:macro name="d1_prefixed" params="prefix:='d1_' include_fingers:='true'">
     <link
       name="${prefix}base_link">
       <inertial>
@@ -354,111 +354,113 @@
         effort="0"
         velocity="0" />
     </joint>
-    <link
-      name="${prefix}Link7_1">
-      <inertial>
+    <xacro:if value="${include_fingers}">
+      <link
+        name="${prefix}Link7_1">
+        <inertial>
+          <origin
+            xyz="0.018927 0.006 0.012082"
+            rpy="0 0 0" />
+          <mass
+            value="0.015046" />
+          <inertia
+            ixx="1.2692E-06"
+            ixy="7.7441E-20"
+            ixz="-1.133E-07"
+            iyy="2.0229E-06"
+            iyz="1.2044E-20"
+            izz="2.6177E-06" />
+        </inertial>
+        <visual>
+          <origin
+            xyz="0 0 0"
+            rpy="0 0 0" />
+          <geometry>
+            <mesh
+              filename="package://d1_description/meshes/Link7_1.STL" />
+          </geometry>
+        </visual>
+        <collision>
+          <origin
+            xyz="0 0 0"
+            rpy="0 0 0" />
+          <geometry>
+            <mesh
+              filename="package://d1_description/meshes/Link7_1.STL" />
+          </geometry>
+        </collision>
+      </link>
+      <joint
+        name="${prefix}Joint7_1"
+        type="prismatic">
         <origin
-          xyz="0.018927 0.006 0.012082"
-          rpy="0 0 0" />
-        <mass
-          value="0.015046" />
-        <inertia
-          ixx="1.2692E-06"
-          ixy="7.7441E-20"
-          ixz="-1.133E-07"
-          iyy="2.0229E-06"
-          iyz="1.2044E-20"
-          izz="2.6177E-06" />
-      </inertial>
-      <visual>
+          xyz="-0.0056012 -0.029636 0.0706"
+          rpy="-1.5714 -1.5708 0" />
+        <parent
+          link="${prefix}Link6" />
+        <child
+          link="${prefix}Link7_1" />
+        <axis
+          xyz="0 0 -1" />
+        <limit
+          lower="0"
+          upper="0.03"
+          effort="0"
+          velocity="0" />
+      </joint>
+      <link
+        name="${prefix}Link7_2">
+        <inertial>
+          <origin
+            xyz="0.018927 -0.006 0.012082"
+            rpy="0 0 0" />
+          <mass
+            value="0.015046" />
+          <inertia
+            ixx="1.2692E-06"
+            ixy="-7.8273E-20"
+            ixz="-1.133E-07"
+            iyy="2.0229E-06"
+            iyz="-1.2122E-20"
+            izz="2.6177E-06" />
+        </inertial>
+        <visual>
+          <origin
+            xyz="0 0 0"
+            rpy="0 0 0" />
+          <geometry>
+            <mesh
+              filename="package://d1_description/meshes/Link7_2.STL" />
+          </geometry>
+        </visual>
+        <collision>
+          <origin
+            xyz="0 0 0"
+            rpy="0 0 0" />
+          <geometry>
+            <mesh
+              filename="package://d1_description/meshes/Link7_2.STL" />
+          </geometry>
+        </collision>
+      </link>
+      <joint
+        name="${prefix}Joint7_2"
+        type="prismatic">
         <origin
-          xyz="0 0 0"
-          rpy="0 0 0" />
-        <geometry>
-          <mesh
-            filename="package://d1_description/meshes/Link7_1.STL" />
-        </geometry>
-      </visual>
-      <collision>
-        <origin
-          xyz="0 0 0"
-          rpy="0 0 0" />
-        <geometry>
-          <mesh
-            filename="package://d1_description/meshes/Link7_1.STL" />
-        </geometry>
-      </collision>
-    </link>
-    <joint
-      name="${prefix}Joint7_1"
-      type="prismatic">
-      <origin
-        xyz="-0.0056012 -0.029636 0.0706"
-        rpy="-1.5714 -1.5708 0" />
-      <parent
-        link="${prefix}Link6" />
-      <child
-        link="${prefix}Link7_1" />
-      <axis
-        xyz="0 0 -1" />
-      <limit
-        lower="0"
-        upper="0.03"
-        effort="0"
-        velocity="0" />
-    </joint>
-    <link
-      name="${prefix}Link7_2">
-      <inertial>
-        <origin
-          xyz="0.018927 -0.006 0.012082"
-          rpy="0 0 0" />
-        <mass
-          value="0.015046" />
-        <inertia
-          ixx="1.2692E-06"
-          ixy="-7.8273E-20"
-          ixz="-1.133E-07"
-          iyy="2.0229E-06"
-          iyz="-1.2122E-20"
-          izz="2.6177E-06" />
-      </inertial>
-      <visual>
-        <origin
-          xyz="0 0 0"
-          rpy="0 0 0" />
-        <geometry>
-          <mesh
-            filename="package://d1_description/meshes/Link7_2.STL" />
-        </geometry>
-      </visual>
-      <collision>
-        <origin
-          xyz="0 0 0"
-          rpy="0 0 0" />
-        <geometry>
-          <mesh
-            filename="package://d1_description/meshes/Link7_2.STL" />
-        </geometry>
-      </collision>
-    </link>
-    <joint
-      name="${prefix}Joint7_2"
-      type="prismatic">
-      <origin
-        xyz="-0.0056388 0.02964 0.0706"
-        rpy="1.5702 -1.5708 0" />
-      <parent
-        link="${prefix}Link6" />
-      <child
-        link="${prefix}Link7_2" />
-      <axis
-        xyz="0 0 1" />
-      <limit
-        lower="-0.03"
-        upper="0"
-        effort="0"
-        velocity="0" />
-    </joint>
+          xyz="-0.0056388 0.02964 0.0706"
+          rpy="1.5702 -1.5708 0" />
+        <parent
+          link="${prefix}Link6" />
+        <child
+          link="${prefix}Link7_2" />
+        <axis
+          xyz="0 0 1" />
+        <limit
+          lower="-0.03"
+          upper="0"
+          effort="0"
+          velocity="0" />
+      </joint>
+    </xacro:if>
   </xacro:macro>
 </robot>

@@ -1,12 +1,16 @@
 <?xml version="1.0"?>
 <robot name="go2_d1_combined" xmlns:xacro="http://www.ros.org/wiki/xacro">
   <xacro:arg name="arm_prefix" default="d1_" />
+  <xacro:arg name="include_fingers" default="true" />
   <xacro:property name="arm_prefix_value" value="$(arg arm_prefix)" />
+  <xacro:property name="include_fingers_value" value="$(arg include_fingers)" />
 
   <xacro:include filename="$(find unitree_description)/model/go2/go2.urdf" />
   <xacro:include filename="$(find go2_d1_integration)/urdf/d1_prefixed.xacro" />
 
-  <xacro:d1_prefixed prefix="${arm_prefix_value}" />
+  <xacro:d1_prefixed
+    prefix="${arm_prefix_value}"
+    include_fingers="${include_fingers_value}" />
 
   <joint name="go2_to_d1_mount" type="fixed">
     <origin xyz="-0.0071 0 0.087" rpy="0 0 0" />
