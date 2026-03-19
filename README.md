@@ -110,6 +110,14 @@ ROS Bag collection
 ros2 bag record -s mcap -o "direction_estimator_bag_$(date +%Y%m%d_%H%M%S)" /data/push_event /lowstate /arm_angles
 ```
 
+## InEKF Debug
+
+```bash
+export LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/cmeel.prefix/lib:$LD_LIBRARY_PATH
+ldd /home/go2-control-stack/ros2_ws/install/inekf/lib/python3.10/site-packages/inekf/inekf_pywrap*.so
+export LD_LIBRARY_PATH=/opt/ros/humble/lib/aarch64-linux-gnu:/usr/local/lib/python3.10/dist-packages/cmeel.prefix/lib:$LD_LIBRARY_PATH
+```
+
 ## Workspace Packages
 
 ### Project Packages
