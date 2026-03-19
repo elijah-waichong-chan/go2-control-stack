@@ -15,19 +15,24 @@ from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 from go2_msgs.msg import ArmAngles, LocomotionCmd, LoopStatus, QDq
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Int32, String
 from tf2_msgs.msg import TFMessage
 from unitree_go.msg import LowCmd, LowState
-from std_msgs.msg import Int32
 from unitree_arm.msg import ArmString
 from telemetry_dashboard import launch_process_manager
 
 
 _ROS_RUNTIME_LOCK = threading.Lock()
 _PRIMARY_ROS_NODE_NAME = f"telemetry_dashboard_{os.getpid()}"
-_ROS_RUNTIMES: Dict[
+
+
+@st.cache_resource(show_spinner=False)
+def _get_ros_runtimes() -> Dict[
     str,
     Tuple["TelemetryNode", rclpy.executors.SingleThreadedExecutor, threading.Thread],
-] = {}
+]:
+    # Keep the ROS runtime registry alive across Streamlit reruns in the same process.
+    return {}
 
 
 class TelemetryNode(Node):
@@ -64,9 +69,10 @@ class TelemetryNode(Node):
             "lowcmd": "/lowcmd",
             "joint_states": "/joint_states",
             "tf": "/tf",
-            "tf_static": "/tf_static",
             "arm_angles": "/arm_angles",
             "arm_feedback": "/arm_Feedback",
+            "arm_command": "/arm_Command",
+            "arm_ik_debug": "/arm_ik_debug",
             "intent_forward_backward": "/direction_intent/forward_backward",
             "intent_left_right": "/direction_intent/left_right",
         }
@@ -86,12 +92,15 @@ class TelemetryNode(Node):
         self.create_subscription(
             TFMessage, self._topic_names["tf"], self.on_tf, qos
         )
-        self.create_subscription(
-            TFMessage, self._topic_names["tf_static"], self.on_tf_static, qos
-        )
         self.create_subscription(ArmAngles, self._topic_names["arm_angles"], self.on_arm_angles, qos)
         self.create_subscription(
             ArmString, self._topic_names["arm_feedback"], self.on_arm_feedback, qos
+        )
+        self.create_subscription(
+            ArmString, self._topic_names["arm_command"], self.on_arm_command, qos
+        )
+        self.create_subscription(
+            String, self._topic_names["arm_ik_debug"], self.on_arm_ik_debug, qos
         )
         self.create_subscription(
             Int32,
@@ -186,14 +195,21 @@ class TelemetryNode(Node):
     def on_tf(self, msg: TFMessage) -> None:
         self._mark_topic("tf")
 
-    def on_tf_static(self, msg: TFMessage) -> None:
-        self._mark_topic("tf_static")
-
     def on_arm_angles(self, msg: ArmAngles) -> None:
         self._mark_topic("arm_angles")
 
     def on_arm_feedback(self, msg: ArmString) -> None:
         self._mark_topic("arm_feedback")
+
+    def on_arm_command(self, msg: ArmString) -> None:
+        self._mark_topic("arm_command")
+
+    def on_arm_ik_debug(self, msg: String) -> None:
+        with self._lock:
+            t = time.monotonic()
+            self._status["arm_ik_debug"] = (True, t)
+            self._update_topic_rate("arm_ik_debug", t)
+            self._topic_latest_msg["arm_ik_debug"] = msg.data
 
     def _mark_topic(self, key: str) -> None:
         with self._lock:
@@ -280,19 +296,19 @@ def _register_ros_runtime(
     thread: threading.Thread,
 ) -> None:
     with _ROS_RUNTIME_LOCK:
-        _ROS_RUNTIMES[node_name] = (node, executor, thread)
+        _get_ros_runtimes()[node_name] = (node, executor, thread)
 
 
 def _get_registered_ros_runtime(
     node_name: str,
 ) -> Tuple["TelemetryNode", rclpy.executors.SingleThreadedExecutor, threading.Thread] | None:
     with _ROS_RUNTIME_LOCK:
-        return _ROS_RUNTIMES.get(node_name)
+        return _get_ros_runtimes().get(node_name)
 
 
 def _shutdown_ros_runtime(node_name: str) -> bool:
     with _ROS_RUNTIME_LOCK:
-        runtime = _ROS_RUNTIMES.pop(node_name, None)
+        runtime = _get_ros_runtimes().pop(node_name, None)
 
     if runtime is None:
         return False
@@ -324,7 +340,7 @@ def _shutdown_ros_runtime(node_name: str) -> bool:
 def _shutdown_other_dashboard_nodes(current_node_name: str) -> int:
     with _ROS_RUNTIME_LOCK:
         other_node_names = [
-            node_name for node_name in _ROS_RUNTIMES if node_name != current_node_name
+            node_name for node_name in _get_ros_runtimes() if node_name != current_node_name
         ]
 
     stopped = 0
@@ -616,6 +632,7 @@ def _style_sidebar_buttons(
     foxglove_active: bool,
     rosbag_active: bool,
     state_converter_active: bool,
+    arm_controller_active: bool,
 ) -> None:
     start_green = "#2ecc71"
     start_border = "#27ae60"
@@ -630,6 +647,7 @@ def _style_sidebar_buttons(
         (stop_red if foxglove_active else start_green, stop_border if foxglove_active else start_border),
         (stop_red if rosbag_active else start_green, stop_border if rosbag_active else start_border),
         (stop_red if state_converter_active else start_green, stop_border if state_converter_active else start_border),
+        (stop_red if arm_controller_active else start_green, stop_border if arm_controller_active else start_border),
         (danger_bg, danger_border),
     ]
 
@@ -708,6 +726,7 @@ def _render_sidebar(node: TelemetryNode) -> None:
         launch_process_manager.is_running("state_converter_stack")
         or launch_process_manager.is_running("arm_controller")
     )
+    arm_controller_active = launch_process_manager.is_running("d1_ik_node")
     control_label = (
         "Stop Control Stack" if locomotion_active else "Start Control Stack"
     )
@@ -839,6 +858,23 @@ def _render_sidebar(node: TelemetryNode) -> None:
             st.info(msg)
         else:
             st.warning(msg)
+    arm_controller_label = (
+        "Stop Arm Controller" if arm_controller_active else "Start Arm Controller"
+    )
+    if st.button(
+        arm_controller_label,
+        key="toggle_arm_controller",
+        use_container_width=True,
+        type="primary" if arm_controller_active else "secondary",
+    ):
+        if arm_controller_active:
+            ok, msg = launch_process_manager.stop_arm_controller()
+        else:
+            ok, msg = launch_process_manager.start_arm_controller()
+        if ok:
+            st.info(msg)
+        else:
+            st.warning(msg)
     st.caption("Danger zone")
     if st.button(
         "Destroy Other ROS Nodes",
@@ -871,6 +907,7 @@ def _render_sidebar(node: TelemetryNode) -> None:
         foxglove_active,
         rosbag_active,
         state_converter_active,
+        arm_controller_active,
     )
 
 
@@ -905,7 +942,6 @@ def _render_dashboard(node: TelemetryNode) -> None:
                 ("odometry_filtered", "odometry_filtered"),
                 ("joint_states", "joint_states"),
                 ("tf", "tf"),
-                ("tf_static", "tf_static"),
                 ("qdq_est", "qdq_est"),
             ],
         ),
@@ -914,6 +950,8 @@ def _render_dashboard(node: TelemetryNode) -> None:
             [
                 ("arm_feedback", "arm_feedback"),
                 ("arm_angles", "arm_angles"),
+                ("arm_command", "arm_command"),
+                ("arm_ik_debug", "arm_ik_debug"),
             ],
         ),
         (
@@ -966,6 +1004,10 @@ def _render_dashboard(node: TelemetryNode) -> None:
             "</div>"
         )
     st.markdown("".join(group_blocks), unsafe_allow_html=True)
+    arm_ik_debug_msg = topic_latest_msg.get("arm_ik_debug")
+    if arm_ik_debug_msg:
+        st.caption("Arm IK Debug")
+        st.code(arm_ik_debug_msg, language="text")
     st.subheader("Nodes")
     node_names = snapshot.get("node_names", [])
     if node_names:
