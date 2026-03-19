@@ -83,6 +83,12 @@ class D1IKSolver:
             dtype=float,
         ))
         self.nominal_q = q0.copy()
+        self.set_nominal_q(self.nominal_q)
+        self.last_solve_time_ms = 0.0
+
+    def set_nominal_q(self, q: JointVector) -> None:
+        q = np.asarray(q, dtype=float)
+        self.nominal_q = q.copy()
         self.nominal_end_effector_y = self.get_end_effector_y(self.nominal_q)
         self.nominal_end_effector_z = self.get_end_effector_z(self.nominal_q)
         self.nominal_end_effector_rotation = self.get_end_effector_rotation(self.nominal_q)
@@ -90,7 +96,6 @@ class D1IKSolver:
             self.get_joint_position("Joint6", self.nominal_q)
             - self.get_joint_position("Joint5", self.nominal_q)
         )
-        self.last_solve_time_ms = 0.0
 
     def get_model_q(self, q: JointVector) -> JointVector:
         q = np.asarray(q, dtype=float)
