@@ -152,6 +152,15 @@ def start_state_converter_stack() -> Tuple[bool, str]:
         return True, "started state converter node and arm feedback parser"
 
 
+def start_arm_controller() -> Tuple[bool, str]:
+    with _LOCK:
+        return _start_process(
+            "d1_ik_node",
+            ["ros2", "run", "arm_controller", "d1_ik_node"],
+            "started arm_controller d1_ik_node",
+        )
+
+
 def stop_launch(name: str) -> Tuple[bool, str]:
     with _LOCK:
         _cleanup_stale(name)
@@ -191,6 +200,10 @@ def stop_state_converter_stack() -> Tuple[bool, str]:
     if not any_running:
         return False, "state converter stack not running"
     return True, "; ".join(results)
+
+
+def stop_arm_controller() -> Tuple[bool, str]:
+    return stop_launch("d1_ik_node")
 
 
 def _normalize_node_name(name: str) -> str:
@@ -281,5 +294,6 @@ def stop_all() -> None:
         "rosbag_recording",
         "state_converter_stack",
         "arm_controller",
+        "d1_ik_node",
     ):
         stop_launch(name)
