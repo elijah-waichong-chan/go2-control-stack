@@ -54,6 +54,7 @@ def _make_loop_status(status_code: int) -> LoopStatus:
 class ArmFeedbackParser(Node):
     STATUS_PUBLISHING = 1
     STATUS_WAITING_FOR_FEEDBACK = 2
+    ANGLE_FEEDBACK_SEQ = 10
 
     def __init__(self) -> None:
         super().__init__("arm_feedback_parser")
@@ -99,6 +100,10 @@ class ArmFeedbackParser(Node):
         if parsed is None:
             return
 
+        seq = _to_int(parsed.get("seq"), default=0)
+        if seq != self.ANGLE_FEEDBACK_SEQ:
+            return
+
         funcode = _to_int(parsed.get("funcode"), default=-1)
         if funcode == 3:
             return
@@ -108,7 +113,7 @@ class ArmFeedbackParser(Node):
         out = ArmAngles()
         out.header.stamp = self.get_clock().now().to_msg()
         out.header.frame_id = "arm_feedback_parser"
-        out.seq = _to_int(parsed.get("seq"), default=0) & 0xFFFFFFFF
+        out.seq = seq & 0xFFFFFFFF
         out.address = _to_int(parsed.get("address"), default=0) & 0xFF
         out.funcode = funcode & 0xFF
         out.angle_deg = self._extract_angles(parsed)
