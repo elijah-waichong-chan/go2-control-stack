@@ -8,74 +8,64 @@ import time
 import rclpy
 from go2_msgs.msg import LocomotionCmd
 from rclpy.node import Node
-from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
-from std_msgs.msg import Int32
 
-from intent_estimator.intent_cmd_override import TimedIntentXVelocity
+import numpy as np
+from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
+from std_msgs.msg import String
+
+from go2_msgs.msg import ArmAngles
+from unitree_arm.msg import ArmString
 
 
 class ForwardBackwardIntentCmdPublisher(Node):
-    """Drive `/locomotion_cmd` directly from forward/backward intent labels."""
+    """Drive `/locomotion_cmd`"""
 
     def __init__(self) -> None:
         super().__init__("forward_backward_intent_cmd_publisher")
 
-        self.declare_parameter(
-            "intent_topic", "/direction_intent/forward_backward"
-        )
-        self.declare_parameter("locomotion_cmd_topic", "/locomotion_cmd")
-        self.declare_parameter("publish_hz", 50.0)
-        self.declare_parameter("intent_hold_s", 1.0)
-        self.declare_parameter("backward_x_vel", -0.5)
-        self.declare_parameter("forward_x_vel", 0.5)
-        self.declare_parameter("y_vel", 0.0)
-        self.declare_parameter("yaw_rate", 0.0)
-        self.declare_parameter("z_pos", 0.27)
-
-        self.intent_topic = str(self.get_parameter("intent_topic").value)
-        self.locomotion_cmd_topic = str(
-            self.get_parameter("locomotion_cmd_topic").value
-        )
-        self.publish_hz = max(
-            1.0, float(self.get_parameter("publish_hz").value)
-        )
-        self.y_vel = float(self.get_parameter("y_vel").value)
-        self.yaw_rate = float(self.get_parameter("yaw_rate").value)
-        self.z_pos = float(self.get_parameter("z_pos").value)
-        self.x_override = TimedIntentXVelocity(
-            hold_s=max(0.0, float(self.get_parameter("intent_hold_s").value)),
-            backward_x_vel=float(self.get_parameter("backward_x_vel").value),
-            forward_x_vel=float(self.get_parameter("forward_x_vel").value),
-        )
+        self.publish_hz = float(50.0)
+        self.x_vel = float(0.0)
+        self.y_vel = float(0.0)
+        self.yaw_rate = float(0.0)
+        self.z_pos = float(0.27)
 
         qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=10,
-            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.VOLATILE,
         )
-        self.sub_intent = self.create_subscription(
-            Int32, self.intent_topic, self.on_intent, qos
+
+        self.sub_arm_angles = self.create_subscription(
+            ArmAngles,
+            "/arm_angles",
+            self.on_arm_angles,
+            qos,
         )
         self.pub_cmd = self.create_publisher(
-            LocomotionCmd, self.locomotion_cmd_topic, qos
+            LocomotionCmd, 
+            "/locomotion_cmd", 
+            qos
         )
         self.timer = self.create_timer(1.0 / self.publish_hz, self.on_timer)
 
-        self.get_logger().info(
-            "forward_backward_intent_cmd_publisher ready: "
-            f"{self.intent_topic} -> {self.locomotion_cmd_topic}, "
-            f"hold={self.x_override.hold_s:.2f}s, "
-            f"backward={self.x_override.backward_x_vel:.2f}m/s, "
-            f"forward={self.x_override.forward_x_vel:.2f}m/s"
-        )
+    def on_arm_angles(self, msg: ArmAngles) -> None:
+        if len(msg.angle_deg) == 0:
+            return
 
-    def on_intent(self, msg: Int32) -> None:
-        self.x_override.on_intent(int(msg.data), time.monotonic())
+        current_q = np.asarray(msg.angle_deg[:6], dtype=float)
+        if current_q[0] > -80.0 and current_q[0] < 0.0:
+            self.x_vel = 0.3
+        elif current_q[0] < -100.0 and current_q[0] > -180.0:
+            self.x_vel = -0.5
+        else:
+            self.x_vel = 0.0
+
 
     def on_timer(self) -> None:
         msg = LocomotionCmd()
         msg.stamp = self.get_clock().now().to_msg()
-        msg.x_vel = self.x_override.current_x_vel(time.monotonic())
+        msg.x_vel = self.x_vel
         msg.y_vel = self.y_vel
         msg.z_pos = self.z_pos
         msg.yaw_rate = self.yaw_rate
