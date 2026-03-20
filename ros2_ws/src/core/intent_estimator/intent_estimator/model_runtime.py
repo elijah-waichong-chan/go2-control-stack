@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -40,6 +41,12 @@ def require_runtime_dependencies() -> None:
             "onnxruntime is required for direction intent inference. "
             "Install with: pip install onnxruntime"
         )
+
+
+def default_onnx_intra_threads() -> int:
+    """Choose a conservative default for CPU inference threading."""
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(4, cpu_count))
 
 
 def as_int_mapping(raw: dict[Any, Any] | None) -> dict[int, int]:
@@ -221,8 +228,8 @@ class SlidingWindowIntentModel:
     ):
         """Create an ONNX Runtime session and reconcile tensor names."""
         opts = ort.SessionOptions()
-        opts.intra_op_num_threads = 1
-        opts.inter_op_num_threads = 1
+        opts.intra_op_num_threads = max(1, int(onnx_intra_threads))
+        opts.inter_op_num_threads = max(1, int(onnx_inter_threads))
         opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         session = ort.InferenceSession(
             str(model_path),
