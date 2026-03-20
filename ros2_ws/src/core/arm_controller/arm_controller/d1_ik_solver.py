@@ -219,14 +219,17 @@ class D1IKSolver:
 
         opti = ca.Opti()
         q_var = opti.variable(len(self.joint_names))
+        q_target = ca.DM(q)
         nominal_rotation = ca.DM(self.nominal_end_effector_rotation)
         rotation_error = self.get_casadi_end_effector_rotation(q_var) - nominal_rotation
         y_error = self.get_casadi_end_effector_y(q_var) - self.nominal_end_effector_y
         z_error = self.get_casadi_end_effector_z(q_var) - self.nominal_end_effector_z
+        q_input_error = q_var - q_target
         opti.minimize(
             10 * ca.sumsqr(ca.vec(rotation_error))
-            + 5 * ca.sumsqr(y_error)
-            + ca.sumsqr(z_error)
+            + 5 * ca.sumsqr(z_error)
+            + ca.sumsqr(y_error)
+            # + 0.001 * ca.sumsqr(q_input_error)
         )
 
         # Joint Angles
