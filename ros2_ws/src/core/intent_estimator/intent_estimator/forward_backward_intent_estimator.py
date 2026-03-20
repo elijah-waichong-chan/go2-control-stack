@@ -8,7 +8,7 @@ import time
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from go2_msgs.msg import QDq, LoopStatus
+from go2_msgs.msg import LoopStatus
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -16,6 +16,7 @@ from rclpy.qos import (
     QoSProfile,
     QoSReliabilityPolicy,
 )
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Int32
 from unitree_go.msg import LowState
 
@@ -51,10 +52,24 @@ def _make_loop_status(status_code: int) -> LoopStatus:
 
 
 class ForwardBackwardIntentEstimatorNode(Node):
-    """Run the 012 model from foot force, IMU acceleration, and qdq_est."""
+    """Run the 012 model from foot force, IMU acceleration, and joint_states."""
 
     STATUS_RUNNING = 1
     STATUS_WAITING_FOR_TOPICS = 2
+    LEG_JOINT_ORDER = (
+        "FL_hip_joint",
+        "FL_thigh_joint",
+        "FL_calf_joint",
+        "FR_hip_joint",
+        "FR_thigh_joint",
+        "FR_calf_joint",
+        "RL_hip_joint",
+        "RL_thigh_joint",
+        "RL_calf_joint",
+        "RR_hip_joint",
+        "RR_thigh_joint",
+        "RR_calf_joint",
+    )
 
     def __init__(self) -> None:
         super().__init__("forward_backward_intent_estimator")
@@ -63,7 +78,7 @@ class ForwardBackwardIntentEstimatorNode(Node):
 
         self.model_dir = default_model_dir.expanduser()
         self.lowstate_topic = "/lowstate"
-        self.qdq_topic = "/qdq_est"
+        self.joint_states_topic = "/joint_states"
         self.output_topic = "/direction_intent/forward_backward"
         self.status_topic = "/status/intent_estimator/forward_backward"
         self.status_hz = 10.0
@@ -78,9 +93,10 @@ class ForwardBackwardIntentEstimatorNode(Node):
             sampling_hz=self.sampling_hz,
             publish_hz=self.publish_hz,
         )
-        self.last_qdq: QDq | None = None
+        self.last_joint_state: JointState | None = None
+        self.joint_index: dict[str, int] = {}
         self.have_lowstate = False
-        self.have_qdq = False
+        self.have_joint_states = False
         self.status_code = self.STATUS_WAITING_FOR_TOPICS
         self.waiting_on: str | None = None
         self.running_logged = False
@@ -101,8 +117,8 @@ class ForwardBackwardIntentEstimatorNode(Node):
         self.sub_lowstate = self.create_subscription(
             LowState, self.lowstate_topic, self.on_lowstate, sensor_qos
         )
-        self.sub_qdq = self.create_subscription(
-            QDq, self.qdq_topic, self.on_qdq, sensor_qos
+        self.sub_joint_states = self.create_subscription(
+            JointState, self.joint_states_topic, self.on_joint_states, sensor_qos
         )
         self.pub_intent = self.create_publisher(Int32, self.output_topic, 10)
         self.pub_status = self.create_publisher(LoopStatus, self.status_topic, status_qos)
@@ -111,7 +127,7 @@ class ForwardBackwardIntentEstimatorNode(Node):
 
         self.get_logger().info(
             "forward_backward_intent_estimator ready: "
-            f"{self.lowstate_topic} + {self.qdq_topic} -> {self.output_topic}, "
+            f"{self.lowstate_topic} + {self.joint_states_topic} -> {self.output_topic}, "
             f"status={self.status_topic}, "
             f"model={self.model.metadata.model_path}, "
             f"window={self.sliding_window_ms:.0f}ms@{self.sampling_hz:.0f}Hz, "
@@ -133,8 +149,8 @@ class ForwardBackwardIntentEstimatorNode(Node):
         missing_topics = []
         if not self.have_lowstate:
             missing_topics.append(self.lowstate_topic)
-        if not self.have_qdq:
-            missing_topics.append(self.qdq_topic)
+        if not self.have_joint_states:
+            missing_topics.append(self.joint_states_topic)
 
         if missing_topics:
             waiting_on = ", ".join(missing_topics)
@@ -153,17 +169,18 @@ class ForwardBackwardIntentEstimatorNode(Node):
             self.get_logger().info("forward_backward_intent_estimator running")
             self.running_logged = True
 
-    def on_qdq(self, msg: QDq) -> None:
-        """Cache the latest qdq_est message for the next lowstate sample."""
-        self.last_qdq = msg
-        self.have_qdq = True
+    def on_joint_states(self, msg: JointState) -> None:
+        """Cache the latest joint_states message for the next lowstate sample."""
+        self.last_joint_state = msg
+        self.joint_index = {name: i for i, name in enumerate(msg.name)}
+        self.have_joint_states = True
         self._update_status()
 
     def on_lowstate(self, msg: LowState) -> None:
         """Build a 19-feature sample and publish the throttled predicted label."""
         self.have_lowstate = True
         self._update_status()
-        if self.last_qdq is None:
+        if self.last_joint_state is None:
             return
 
         foot_force = [float(x) for x in msg.foot_force[:4]]
@@ -180,10 +197,20 @@ class ForwardBackwardIntentEstimatorNode(Node):
             )
             return
 
-        joint_dq = [float(x) for x in self.last_qdq.dq[6:18]]
-        if len(joint_dq) != 12:
+        joint_dq: list[float] = []
+        missing_joints: list[str] = []
+        joint_state = self.last_joint_state
+        for joint_name in self.LEG_JOINT_ORDER:
+            joint_idx = self.joint_index.get(joint_name)
+            if joint_idx is None or joint_idx >= len(joint_state.velocity):
+                missing_joints.append(joint_name)
+                continue
+            joint_dq.append(float(joint_state.velocity[joint_idx]))
+
+        if missing_joints:
             self.get_logger().error(
-                f"Expected 12 joint dq values from /qdq_est, got {len(joint_dq)}."
+                "Expected leg joint velocities from /joint_states, missing: "
+                f"{missing_joints}."
             )
             return
 
