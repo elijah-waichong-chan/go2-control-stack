@@ -110,6 +110,7 @@ class HeuristicAutonomyCmdPublisher(Node):
         self.latest_left_right_intent: int | None = None
         self.last_left_right_intent_time_ns: int | None = None
         self.left_right_recent: deque[int] = deque(maxlen=self.left_right_window_size)
+        self.active_y_vel = self.base_y_vel
         self.zero_hold_until_ns: int | None = None
         self.lowstate_stale_logged = False
         self.last_debug_log_time_ns: int | None = None
@@ -259,21 +260,36 @@ class HeuristicAutonomyCmdPublisher(Node):
             > self.left_right_intent_timeout_s
         ):
             self.left_right_recent.clear()
+            self.active_y_vel = self.base_y_vel
             self.zero_hold_until_ns = None
             return self.base_y_vel
+
+        recent = list(self.left_right_recent)
+        saw_zero_window = len(recent) >= self.zero_window_size and all(
+            value == 0 for value in recent[-self.zero_window_size :]
+        )
+
+        # Once lateral motion is active, keep it latched until an explicit zero window arrives.
+        if self.active_y_vel != self.base_y_vel:
+            if saw_zero_window:
+                self.active_y_vel = self.base_y_vel
+                self.zero_hold_until_ns = now_ns + int(self.zero_hold_s * 1e9)
+            else:
+                return self.active_y_vel
 
         if self.zero_hold_until_ns is not None and now_ns < self.zero_hold_until_ns:
             return 0.0
 
-        recent = list(self.left_right_recent)
         if len(recent) >= self.left_window_size and all(
             intent == self.left_intent_label for intent in recent[-self.left_window_size :]
         ):
-            return self.left_y_vel
+            self.active_y_vel = self.left_y_vel
+            return self.active_y_vel
         if len(recent) >= self.right_window_size and all(
             intent == self.right_intent_label for intent in recent[-self.right_window_size :]
         ):
-            return self.right_y_vel
+            self.active_y_vel = self.right_y_vel
+            return self.active_y_vel
         return self.base_y_vel
 
     def maybe_log_heading_debug(self, commanded_yaw_rate: float, commanded_y_vel: float) -> None:

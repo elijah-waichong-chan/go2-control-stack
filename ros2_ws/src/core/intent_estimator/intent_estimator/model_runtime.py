@@ -102,9 +102,32 @@ def resolve_deploy_path(model_dir: Path) -> Path:
     if len(flat_candidates) == 1:
         return flat_candidates[0]
     if len(flat_candidates) > 1:
+        valid_candidates: list[Path] = []
+        invalid_candidates: list[str] = []
+        for candidate in flat_candidates:
+            try:
+                deploy_cfg = load_deploy_cfg(candidate)
+                model_cfg = deploy_cfg.get("model", {})
+                model_path = resolve_model_path(candidate, model_cfg)
+            except Exception as exc:
+                invalid_candidates.append(f"{candidate.name} ({exc})")
+                continue
+            if model_path.exists():
+                valid_candidates.append(candidate)
+            else:
+                invalid_candidates.append(
+                    f"{candidate.name} (missing model: {model_path.name})"
+                )
+
+        if len(valid_candidates) == 1:
+            return valid_candidates[0]
+
+        details = ", ".join(str(path.name) for path in flat_candidates)
+        if invalid_candidates:
+            details += "; invalid candidates: %s" % ", ".join(invalid_candidates)
         raise RuntimeError(
-            "Expected exactly one '*.deploy.yaml' in %s, found: %s"
-            % (model_dir, ", ".join(str(path.name) for path in flat_candidates))
+            "Expected exactly one usable '*.deploy.yaml' in %s, found: %s"
+            % (model_dir, details)
         )
 
     raise RuntimeError(
@@ -366,20 +389,10 @@ def load_model_metadata(model_dir: Path) -> ModelMetadata:
     nonzero_indices = tuple(int(index) for index in raw_nonzero_indices)
 
     if prediction_rule == "nonzero_threshold":
-        if nonzero_prediction_threshold is None:
-            raise RuntimeError(
-                "inference.nonzero_prediction_threshold is required when "
-                "prediction_rule=nonzero_threshold."
-            )
-        if not 0.0 <= nonzero_prediction_threshold <= 1.0:
-            raise RuntimeError(
-                "inference.nonzero_prediction_threshold must be in [0, 1]."
-            )
-        if not nonzero_indices:
-            raise RuntimeError(
-                "inference.nonzero_indices must be non-empty when "
-                "prediction_rule=nonzero_threshold."
-            )
+        prediction_rule = "argmax"
+        nonzero_prediction_threshold = None
+        zero_index = 0
+        nonzero_indices = ()
 
     return ModelMetadata(
         model_dir=model_dir,
@@ -557,30 +570,6 @@ class SlidingWindowIntentModel:
     def _select_prediction_index(self, scores: np.ndarray) -> int:
         """Apply the deploy-configured prediction rule to model outputs."""
         prediction_scores = self._postprocess_scores(scores)
-        output_dim = int(prediction_scores.shape[0])
-        prediction_rule = self.metadata.prediction_rule.lower()
-        if prediction_rule == "nonzero_threshold":
-            if not 0 <= self.metadata.zero_index < output_dim:
-                raise RuntimeError(
-                    "inference.zero_index=%d is out of range for model output_dim=%d."
-                    % (self.metadata.zero_index, output_dim)
-                )
-            invalid_nonzero_indices = [
-                index
-                for index in self.metadata.nonzero_indices
-                if index < 0 or index >= output_dim
-            ]
-            if invalid_nonzero_indices:
-                raise RuntimeError(
-                    "inference.nonzero_indices contains out-of-range values %s for "
-                    "model output_dim=%d."
-                    % (invalid_nonzero_indices, output_dim)
-                )
-            max_nonzero_score = max(
-                float(prediction_scores[index]) for index in self.metadata.nonzero_indices
-            )
-            if max_nonzero_score < float(self.metadata.nonzero_prediction_threshold):
-                return self.metadata.zero_index
         return int(np.argmax(prediction_scores))
 
     def push(self, features: Any, sample_time_s: float) -> int | None:
