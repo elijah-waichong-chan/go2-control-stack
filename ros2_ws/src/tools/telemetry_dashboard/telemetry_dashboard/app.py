@@ -25,13 +25,6 @@ from telemetry_dashboard import launch_process_manager
 _ROS_RUNTIME_LOCK = threading.Lock()
 _PRIMARY_ROS_NODE_NAME = f"telemetry_dashboard_{os.getpid()}"
 _INTENT_ESTIMATORS = {
-    "forward_backward": {
-        "label": "Forward/Backward Estimator",
-        "process_name": "forward_backward_estimator",
-        "executable": "forward_backward_intent_estimator",
-        "status_key": "intent_estimator_forward_backward",
-        "status_topic": "/status/intent_estimator/forward_backward",
-    },
     "left_right": {
         "label": "Left/Right Estimator",
         "process_name": "left_right_estimator",
@@ -97,7 +90,6 @@ class TelemetryNode(Node):
             "arm_feedback": "/arm_Feedback",
             "arm_command": "/arm_Command",
             "arm_ik_debug": "/arm_ik_debug",
-            "intent_forward_backward": "/direction_intent/forward_backward",
             "intent_left_right": "/direction_intent/left_right",
             "intent_up_down": "/direction_intent/up_down",
         }
@@ -127,12 +119,6 @@ class TelemetryNode(Node):
         )
         self.create_subscription(
             String, self._topic_names["arm_ik_debug"], self.on_arm_ik_debug, qos
-        )
-        self.create_subscription(
-            Int32,
-            self._topic_names["intent_forward_backward"],
-            lambda m: self.on_intent("intent_forward_backward", m),
-            qos,
         )
         self.create_subscription(
             Int32,
@@ -169,12 +155,6 @@ class TelemetryNode(Node):
             LoopStatus,
             "/status/standing_init",
             lambda m: self.on_loop_status("standing_init", m),
-            status_qos,
-        )
-        self.create_subscription(
-            LoopStatus,
-            "/status/intent_estimator/forward_backward",
-            lambda m: self.on_loop_status("intent_estimator_forward_backward", m),
             status_qos,
         )
         self.create_subscription(
@@ -609,7 +589,7 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
         "rl_controller": "/status/loco_ctrl",
         "intent_estimator": (
             intent_estimator_topic
-            or _INTENT_ESTIMATORS["forward_backward"]["status_topic"]
+            or next(iter(_INTENT_ESTIMATORS.values()))["status_topic"]
         ),
     }
 
@@ -713,100 +693,47 @@ def _intent_cell_classes(active: bool, active_cls: str, shape_cls: str) -> str:
     return " ".join(classes)
 
 
-def _render_direction_intent_pad(
+def _render_left_right_intent_pad(
     *,
-    fb_topic_name: str,
-    fb_rate_hz: float | None,
-    fb_available: bool,
-    fb_fresh: bool,
-    fb_label: int | None,
     lr_topic_name: str,
     lr_rate_hz: float | None,
     lr_available: bool,
     lr_fresh: bool,
     lr_label: int | None,
 ) -> str:
-    active_up = active_down = active_left = active_right = active_center = False
-
-    fb_effective_label = fb_label if fb_available and fb_fresh and fb_label is not None else None
+    active_left = active_right = active_center = False
     lr_effective_label = lr_label if lr_available and lr_fresh and lr_label is not None else None
-
-    if fb_effective_label == 1:
-        active_up = True
-    elif fb_effective_label == 2:
-        active_down = True
 
     if lr_effective_label == 3:
         active_left = True
     elif lr_effective_label == 4:
         active_right = True
 
-    active_center = fb_effective_label == 0 and lr_effective_label == 0
+    active_center = lr_effective_label == 0
 
-    def _axis_state(
-        axis_name: str,
-        *,
-        available: bool,
-        fresh: bool,
-        label: int | None,
-        mapping: dict[int, str],
-    ) -> str:
-        if not available:
-            return f"{axis_name} unavailable"
-        if not fresh or label is None:
-            return f"{axis_name} waiting"
-        return mapping.get(label, f"{axis_name} label {label}")
-
-    fb_state = _axis_state(
-        "FB",
-        available=fb_available,
-        fresh=fb_fresh,
-        label=fb_label,
-        mapping={0: "FB idle", 1: "Forward", 2: "Backward"},
-    )
-    lr_state = _axis_state(
-        "LR",
-        available=lr_available,
-        fresh=lr_fresh,
-        label=lr_label,
-        mapping={0: "LR idle", 3: "Left", 4: "Right"},
-    )
-
-    if active_center:
+    if not lr_available:
+        display_state = "Unavailable"
+    elif not lr_fresh or lr_label is None:
+        display_state = "Waiting"
+    elif active_center:
         display_state = "Idle"
+    elif active_left:
+        display_state = "Left"
+    elif active_right:
+        display_state = "Right"
     else:
-        active_parts = []
-        if active_up:
-            active_parts.append("Forward")
-        if active_down:
-            active_parts.append("Backward")
-        if active_left:
-            active_parts.append("Left")
-        if active_right:
-            active_parts.append("Right")
-        if active_parts:
-            display_state = " + ".join(active_parts)
-        else:
-            display_state = f"{fb_state} | {lr_state}"
+        display_state = f"Label {lr_label}"
 
-    fb_rate_text = f"{fb_rate_hz:.1f} Hz" if fb_rate_hz is not None else "Hz --"
     lr_rate_text = f"{lr_rate_hz:.1f} Hz" if lr_rate_hz is not None else "Hz --"
 
     return (
         "<div class=\"intent-card\">"
-        "<div class=\"intent-card-title\">Direction Intent</div>"
-        f"<div class=\"intent-card-caption\">FB: {fb_topic_name} | {fb_rate_text}</div>"
-        f"<div class=\"intent-card-caption\">LR: {lr_topic_name} | {lr_rate_text}</div>"
-        "<div class=\"intent-dpad\">"
-        "<div class=\"intent-spacer\"></div>"
-        f"<div class=\"{_intent_cell_classes(active_up, 'intent-active-up', 'intent-arrow')}\">▲</div>"
-        "<div class=\"intent-spacer\"></div>"
+        "<div class=\"intent-card-title\">Left/Right Intent</div>"
+        f"<div class=\"intent-card-caption\">{lr_topic_name} | {lr_rate_text}</div>"
+        "<div class=\"intent-row\">"
         f"<div class=\"{_intent_cell_classes(active_left, 'intent-active-left', 'intent-arrow')}\">◀</div>"
         f"<div class=\"{_intent_cell_classes(active_center, 'intent-active-center', 'intent-center')}\">●</div>"
         f"<div class=\"{_intent_cell_classes(active_right, 'intent-active-right', 'intent-arrow')}\">▶</div>"
-        "<div class=\"intent-spacer\"></div>"
-        f"<div class=\"{_intent_cell_classes(active_down, 'intent-active-down', 'intent-arrow')}\">▼</div>"
-        "<div class=\"intent-spacer\"></div>"
         "</div>"
         f"<div class=\"intent-card-state\">{display_state}</div>"
         "</div>"
@@ -898,9 +825,6 @@ def _render_sidebar(node: TelemetryNode) -> None:
         "current_ik": "Current IK",
         "manual_control_ik": "Manual z-ref IK",
     }
-    enable_forward_backward_estimator = st.session_state.get(
-        "ctrl_enable_forward_backward_estimator", True
-    )
     enable_left_right_estimator = st.session_state.get(
         "ctrl_enable_left_right_estimator", False
     )
@@ -908,8 +832,6 @@ def _render_sidebar(node: TelemetryNode) -> None:
         "ctrl_enable_up_down_estimator", False
     )
     selected_direction_estimators = []
-    if enable_forward_backward_estimator:
-        selected_direction_estimators.append("forward_backward")
     if enable_left_right_estimator:
         selected_direction_estimators.append("left_right")
     if enable_up_down_estimator:
@@ -926,11 +848,9 @@ def _render_sidebar(node: TelemetryNode) -> None:
         else:
             ok, msg = launch_process_manager.start_launch(
                 "control_stack",
-                "locomotion_controller_cpp",
-                "control_stack.launch.py",
+                "hq_pcot",
+                "locomotion.launch.py",
                 launch_args={
-                    "enable_estimator": "false",
-                    "enable_arm_parser": "false",
                     "enable_wireless_cmd_bridge": str(enable_wireless_cmd_bridge).lower(),
                 },
             )
@@ -1017,11 +937,6 @@ def _render_sidebar(node: TelemetryNode) -> None:
         else:
             st.warning(msg)
     with st.expander("Direction Estimator Options", expanded=False):
-        enable_forward_backward_estimator = st.checkbox(
-            "Forward/Backward Estimator",
-            value=enable_forward_backward_estimator,
-            key="ctrl_enable_forward_backward_estimator",
-        )
         enable_left_right_estimator = st.checkbox(
             "Left/Right Estimator",
             value=enable_left_right_estimator,
@@ -1202,7 +1117,6 @@ def _render_dashboard(node: TelemetryNode) -> None:
         (
             "Intent",
             [
-                ("intent_forward_backward", "intent_forward_backward"),
                 ("intent_left_right", "intent_left_right"),
                 ("intent_up_down", "intent_up_down"),
             ],
@@ -1230,14 +1144,6 @@ def _render_dashboard(node: TelemetryNode) -> None:
         .intent-card-title { font-weight:700; color:#1d2b23; margin-bottom:0.12rem; }
         .intent-card-caption { font-size:0.82rem; color:#64756b; margin-bottom:0.7rem; }
         .intent-card-state { margin-top:0.7rem; font-weight:700; color:#22352a; text-align:center; }
-        .intent-dpad {
-            display:grid;
-            grid-template-columns:62px 62px 62px;
-            grid-template-rows:62px 62px 62px;
-            gap:0.45rem;
-            justify-content:center;
-            align-items:center;
-        }
         .intent-stack {
             display:flex;
             flex-direction:column;
@@ -1246,7 +1152,13 @@ def _render_dashboard(node: TelemetryNode) -> None:
             justify-content:center;
             min-height:194px;
         }
-        .intent-spacer { width:62px; height:62px; }
+        .intent-row {
+            display:flex;
+            gap:0.45rem;
+            align-items:center;
+            justify-content:center;
+            min-height:62px;
+        }
         .intent-cell {
             display:flex;
             align-items:center;
@@ -1311,16 +1223,10 @@ def _render_dashboard(node: TelemetryNode) -> None:
             "</div>"
         )
     st.markdown("".join(group_blocks), unsafe_allow_html=True)
-    fb_topic_name = topic_names.get("intent_forward_backward", "/direction_intent/forward_backward")
     lr_topic_name = topic_names.get("intent_left_right", "/direction_intent/left_right")
     st.markdown(
         "<div class=\"intent-panels\">"
-        + _render_direction_intent_pad(
-            fb_topic_name=fb_topic_name,
-            fb_rate_hz=topic_rate.get("intent_forward_backward"),
-            fb_available=bool(topic_available.get(fb_topic_name, False)),
-            fb_fresh=_topic_ok(fb_topic_name, "intent_forward_backward"),
-            fb_label=_parse_intent_label(topic_latest_msg.get("intent_forward_backward")),
+        + _render_left_right_intent_pad(
             lr_topic_name=lr_topic_name,
             lr_rate_hz=topic_rate.get("intent_left_right"),
             lr_available=bool(topic_available.get(lr_topic_name, False)),
