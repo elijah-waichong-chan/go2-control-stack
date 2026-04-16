@@ -94,7 +94,7 @@ source /home/go2-control-stack/ros2_ws/install/setup.bash
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
 source install/setup.bash
-ros2 launch locomotion_controller dashboard.launch.py
+ros2 ros2 launch locomotion_controller_cpp dashboard.launch.py 
 ```
 
 Then:
