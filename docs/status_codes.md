@@ -61,15 +61,6 @@ Source: `arm_controller/arm_feedback_parser.py`
 - `1`: publishing parsed arm angles
 - `2`: waiting for arm feedback input
 
-### `/status/intent_estimator/forward_backward`
-
-Message type: `go2_msgs/LoopStatus`
-
-Source: `intent_estimator/forward_backward_intent_estimator.py`
-
-- `1`: running
-- `2`: waiting for required input topics
-
 ### `/status/intent_estimator/left_right`
 
 Message type: `go2_msgs/LoopStatus`
@@ -79,26 +70,29 @@ Source: `intent_estimator/left_right_intent_estimator.py`
 - `1`: running
 - `2`: waiting for required input topics
 
+### `/status/intent_estimator/up_down`
+
+Message type: `go2_msgs/LoopStatus`
+
+Source: `intent_estimator/up_down_intent_estimator.py`
+
+- `1`: running
+- `2`: waiting for required input topics
+
 ## Dashboard-Derived Aggregate Status
 
-The telemetry dashboard derives a combined "Intent Estimator" status from:
+The telemetry dashboard derives the "Intent Estimator" card from the freshest recent status among:
 
-- `/status/intent_estimator/forward_backward`
 - `/status/intent_estimator/left_right`
+- `/status/intent_estimator/up_down`
 
-This aggregate code is not itself published on a ROS topic.
+This aggregate view is not itself published on a ROS topic.
 
 Source: `telemetry_dashboard/app.py`
 
-- `1`: both estimators running
-- `2`: forward/backward waiting, left/right running
-- `3`: left/right waiting, forward/backward running
-- `4`: both estimators waiting
-- `5`: forward/backward running, left/right status missing
-- `6`: left/right running, forward/backward status missing
-- `7`: forward/backward waiting, left/right status missing
-- `8`: left/right waiting, forward/backward status missing
-- `0`: any other mixed or unrecognized state
+- `1`: running
+- `2`: waiting for required input topics
+- other values: surfaced directly from the freshest estimator status
 
 ## Notes
 
