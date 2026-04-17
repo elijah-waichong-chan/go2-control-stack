@@ -381,6 +381,7 @@ def stop_all() -> None:
     for name in (
         "control_stack",
         "autonomy",
+        "front_back_estimator",
         "left_right_estimator",
         "up_down_estimator",
         "foxglove_bridge",

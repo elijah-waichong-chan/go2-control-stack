@@ -21,7 +21,7 @@ from rclpy.qos import (
 from std_msgs.msg import Int32
 from unitree_go.msg import LowState
 
-from intent_estimator.model_runtime import (
+from intent_estimator.onnx_runtime import (
     SlidingWindowIntentModel,
     build_selected_feature_vector,
     first_existing_path,

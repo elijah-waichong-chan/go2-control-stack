@@ -1,4 +1,4 @@
-"""Shared runtime utilities for direction intent ONNX models."""
+"""Shared ONNX runtime utilities for direction intent models."""
 
 from __future__ import annotations
 

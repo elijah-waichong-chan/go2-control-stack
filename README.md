@@ -94,7 +94,7 @@ source /home/go2-control-stack/ros2_ws/install/setup.bash
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
 source install/setup.bash
-ros2 ros2 launch locomotion_controller_cpp dashboard.launch.py 
+ros2 launch hq_pcot dashboard.launch.py
 ```
 
 Then:
@@ -135,10 +135,9 @@ export LD_LIBRARY_PATH="$ONNXRUNTIME_ROOT/lib:${LD_LIBRARY_PATH}"
 | `intent_estimator` | Direction intent estimation nodes using 1-D CNN models. |
 | `estimator_bridge` | Converts estimator outputs into the `/qdq_est` format used by this stack. |
 | `go2_msgs` | Custom ROS 2 message definitions used across the stack. |
+| `hq_pcot` | Central ROS 2 launch package for the stack. |
 | `locomotion_controller` | Stand-up initialization, RL policy control, safety stop handling, and launch files. |
 | `telemetry_dashboard` | Streamlit dashboard for module status, topic monitoring, and launch controls. |
-
-`/direction_intent/forward_backward` uses label semantics `0=idle`, `1=forward`, `2=backward`. The current topic publisher applies a 2-consecutive confirmation filter, so the published label only changes after the same new class is predicted twice in a row. The dashboard intent-estimator module card currently monitors only `/status/intent_estimator/forward_backward`, and that status topic now includes loop timing stats in the same format as the locomotion RL controller.
 
 ### Third-Party Packages
 

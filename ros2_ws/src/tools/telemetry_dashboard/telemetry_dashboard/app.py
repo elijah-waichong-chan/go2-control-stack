@@ -25,6 +25,13 @@ from telemetry_dashboard import launch_process_manager
 _ROS_RUNTIME_LOCK = threading.Lock()
 _PRIMARY_ROS_NODE_NAME = f"telemetry_dashboard_{os.getpid()}"
 _INTENT_ESTIMATORS = {
+    "front_back": {
+        "label": "Front/Back Estimator",
+        "process_name": "front_back_estimator",
+        "executable": "front_back_intent_estimator",
+        "status_key": "intent_estimator_forward_backward",
+        "status_topic": "/status/intent_estimator/forward_backward",
+    },
     "left_right": {
         "label": "Left/Right Estimator",
         "process_name": "left_right_estimator",
@@ -90,6 +97,7 @@ class TelemetryNode(Node):
             "arm_feedback": "/arm_Feedback",
             "arm_command": "/arm_Command",
             "arm_ik_debug": "/arm_ik_debug",
+            "intent_forward_backward": "/direction_intent/forward_backward",
             "intent_left_right": "/direction_intent/left_right",
             "intent_up_down": "/direction_intent/up_down",
         }
@@ -119,6 +127,12 @@ class TelemetryNode(Node):
         )
         self.create_subscription(
             String, self._topic_names["arm_ik_debug"], self.on_arm_ik_debug, qos
+        )
+        self.create_subscription(
+            Int32,
+            self._topic_names["intent_forward_backward"],
+            lambda m: self.on_intent("intent_forward_backward", m),
+            qos,
         )
         self.create_subscription(
             Int32,
@@ -155,6 +169,12 @@ class TelemetryNode(Node):
             LoopStatus,
             "/status/standing_init",
             lambda m: self.on_loop_status("standing_init", m),
+            status_qos,
+        )
+        self.create_subscription(
+            LoopStatus,
+            "/status/intent_estimator/forward_backward",
+            lambda m: self.on_loop_status("intent_estimator_forward_backward", m),
             status_qos,
         )
         self.create_subscription(
@@ -740,6 +760,48 @@ def _render_left_right_intent_pad(
     )
 
 
+def _render_front_back_intent_pad(
+    *,
+    topic_name: str,
+    rate_hz: float | None,
+    available: bool,
+    fresh: bool,
+    label: int | None,
+) -> str:
+    display_state = "Waiting"
+    active_forward = active_backward = active_center = False
+
+    if available and fresh and label is not None:
+        if label == 1:
+            display_state = "Forward"
+            active_forward = True
+        elif label == 2:
+            display_state = "Backward"
+            active_backward = True
+        elif label == 0:
+            display_state = "Idle"
+            active_center = True
+        else:
+            display_state = f"Label {label}"
+    elif available:
+        display_state = "No fresh intent"
+
+    rate_text = f"{rate_hz:.1f} Hz" if rate_hz is not None else "Hz --"
+
+    return (
+        "<div class=\"intent-card\">"
+        "<div class=\"intent-card-title\">Front/Back Intent</div>"
+        f"<div class=\"intent-card-caption\">{topic_name} | {rate_text}</div>"
+        "<div class=\"intent-stack\">"
+        f"<div class=\"{_intent_cell_classes(active_forward, 'intent-active-up', 'intent-arrow')}\">▲</div>"
+        f"<div class=\"{_intent_cell_classes(active_center, 'intent-active-center', 'intent-center')}\">●</div>"
+        f"<div class=\"{_intent_cell_classes(active_backward, 'intent-active-down', 'intent-arrow')}\">▼</div>"
+        "</div>"
+        f"<div class=\"intent-card-state\">{display_state}</div>"
+        "</div>"
+    )
+
+
 def _render_up_down_intent_pad(
     *,
     topic_name: str,
@@ -825,6 +887,9 @@ def _render_sidebar(node: TelemetryNode) -> None:
         "current_ik": "Current IK",
         "manual_control_ik": "Manual z-ref IK",
     }
+    enable_front_back_estimator = st.session_state.get(
+        "ctrl_enable_front_back_estimator", True
+    )
     enable_left_right_estimator = st.session_state.get(
         "ctrl_enable_left_right_estimator", False
     )
@@ -832,6 +897,8 @@ def _render_sidebar(node: TelemetryNode) -> None:
         "ctrl_enable_up_down_estimator", False
     )
     selected_direction_estimators = []
+    if enable_front_back_estimator:
+        selected_direction_estimators.append("front_back")
     if enable_left_right_estimator:
         selected_direction_estimators.append("left_right")
     if enable_up_down_estimator:
@@ -876,8 +943,8 @@ def _render_sidebar(node: TelemetryNode) -> None:
         else:
             ok, msg = launch_process_manager.start_node(
                 "autonomy",
-                "intent_estimator",
-                "heuristic_autonomy_cmd_publisher",
+                "coordination_module",
+                "intent_command_coordinator",
             )
         if ok:
             st.info(msg)
@@ -937,6 +1004,11 @@ def _render_sidebar(node: TelemetryNode) -> None:
         else:
             st.warning(msg)
     with st.expander("Direction Estimator Options", expanded=False):
+        enable_front_back_estimator = st.checkbox(
+            "Front/Back Estimator",
+            value=enable_front_back_estimator,
+            key="ctrl_enable_front_back_estimator",
+        )
         enable_left_right_estimator = st.checkbox(
             "Left/Right Estimator",
             value=enable_left_right_estimator,
@@ -1117,6 +1189,7 @@ def _render_dashboard(node: TelemetryNode) -> None:
         (
             "Intent",
             [
+                ("intent_forward_backward", "intent_forward_backward"),
                 ("intent_left_right", "intent_left_right"),
                 ("intent_up_down", "intent_up_down"),
             ],
@@ -1223,9 +1296,17 @@ def _render_dashboard(node: TelemetryNode) -> None:
             "</div>"
         )
     st.markdown("".join(group_blocks), unsafe_allow_html=True)
+    fb_topic_name = topic_names.get("intent_forward_backward", "/direction_intent/forward_backward")
     lr_topic_name = topic_names.get("intent_left_right", "/direction_intent/left_right")
     st.markdown(
         "<div class=\"intent-panels\">"
+        + _render_front_back_intent_pad(
+            topic_name=fb_topic_name,
+            rate_hz=topic_rate.get("intent_forward_backward"),
+            available=bool(topic_available.get(fb_topic_name, False)),
+            fresh=_topic_ok(fb_topic_name, "intent_forward_backward"),
+            label=_parse_intent_label(topic_latest_msg.get("intent_forward_backward")),
+        )
         + _render_left_right_intent_pad(
             lr_topic_name=lr_topic_name,
             lr_rate_hz=topic_rate.get("intent_left_right"),

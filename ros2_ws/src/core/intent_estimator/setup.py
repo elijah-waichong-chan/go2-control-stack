@@ -33,9 +33,9 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'front_back_intent_estimator = intent_estimator.front_back_intent_estimator:main',
             'left_right_intent_estimator = intent_estimator.left_right_intent_estimator:main',
             'up_down_intent_estimator = intent_estimator.up_down_intent_estimator:main',
-            'heuristic_autonomy_cmd_publisher = intent_estimator.heuristic_autonomy_cmd_publisher:main',
         ],
     },
 )
