@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Etc/UTC
@@ -35,26 +35,37 @@ RUN apt update && apt upgrade -y && apt install -y \
     libwebsocketpp-dev \
     nlohmann-json3-dev \
     ros-dev-tools \
-    ros-humble-foxglove-bridge \
-    ros-humble-pinocchio \
-    ros-humble-rmw-cyclonedds-cpp \
-    ros-humble-ros-base \
-    ros-humble-rosidl-generator-dds-idl \
-    ros-humble-rosbag2-storage-mcap \
-    ros-humble-xacro
+    ros-jazzy-foxglove-bridge \
+    ros-jazzy-pinocchio \
+    ros-jazzy-rmw-cyclonedds-cpp \
+    ros-jazzy-ros-base \
+    ros-jazzy-rosidl-generator-dds-idl \
+    ros-jazzy-rosbag2-storage-mcap \
+    ros-jazzy-xacro
 
 RUN git config --global --add safe.directory /home/go2-control-stack/ros2_ws/foxglove-sdk
 
 ENV PIP_DEFAULT_TIMEOUT=120 \
     PIP_RETRIES=10
 
-RUN python3 -m pip install --no-cache-dir --prefer-binary --ignore-installed streamlit onnxruntime==1.18.1 "numpy<2" casadi
+RUN python3 -m pip install --break-system-packages --no-cache-dir --prefer-binary --ignore-installed streamlit onnxruntime==1.18.1 "numpy<2" casadi
 
 ENV ONNXRUNTIME_VERSION=1.18.1
-ENV ONNXRUNTIME_ROOT=/opt/onnxruntime
-ENV LD_LIBRARY_PATH=${ONNXRUNTIME_ROOT}/lib:${LD_LIBRARY_PATH}
+ENV ONNXRUNTIME_ROOT=/root/onnxruntime
+ENV LD_LIBRARY_PATH=${ONNXRUNTIME_ROOT}/lib
 
 RUN mkdir -p ${ONNXRUNTIME_ROOT} && \
     curl -L https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}.tgz \
     | tar -xz -C ${ONNXRUNTIME_ROOT} --strip-components=1
 
+ENV DRAKE_URL=https://drake-packages.csail.mit.edu/drake/nightly/drake-latest-noble-aarch64.tar.gz \
+    DRAKE_INSTALL=/opt/drake
+
+RUN mkdir -p ${DRAKE_INSTALL} && \
+    curl -fL ${DRAKE_URL} -o /tmp/drake.tar.gz && \
+    tar -xzf /tmp/drake.tar.gz -C ${DRAKE_INSTALL} --strip-components=1 && \
+    ${DRAKE_INSTALL}/share/drake/setup/install_prereqs -y
+
+ENV PYTHONPATH=/opt/drake/lib/python3.12/site-packages \
+    CMAKE_PREFIX_PATH=/opt/drake \
+    LD_LIBRARY_PATH=/opt/drake/lib:/opt/onnxruntime/lib
