@@ -10,7 +10,7 @@ import time
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from go2_msgs.msg import ArmAngles, LoopStatus
+from hq_pcot_msgs.msg import ArmAngles, LoopStatus
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,

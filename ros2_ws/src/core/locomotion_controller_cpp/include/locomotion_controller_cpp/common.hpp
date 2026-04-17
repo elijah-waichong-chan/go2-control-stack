@@ -6,7 +6,7 @@
 #include <cstring>
 #include <vector>
 
-#include "go2_msgs/msg/loop_status.hpp"
+#include "hq_pcot_msgs/msg/loop_status.hpp"
 #include "unitree_go/msg/low_cmd.hpp"
 
 namespace locomotion_controller_cpp
@@ -24,7 +24,7 @@ inline T Clamp(const T value, const T lo, const T hi)
   return std::max(lo, std::min(hi, value));
 }
 
-inline go2_msgs::msg::LoopStatus MakeLoopStatus(
+inline hq_pcot_msgs::msg::LoopStatus MakeLoopStatus(
   const int status_code,
   const float avg_loop_ms = -1.0F,
   const float p99_loop_ms = -1.0F,
@@ -33,7 +33,7 @@ inline go2_msgs::msg::LoopStatus MakeLoopStatus(
   const int deadline_miss_count = -1,
   const int sample_count = -1)
 {
-  go2_msgs::msg::LoopStatus msg;
+  hq_pcot_msgs::msg::LoopStatus msg;
   msg.status = status_code;
   msg.avg_loop_ms = avg_loop_ms;
   msg.p99_loop_ms = p99_loop_ms;

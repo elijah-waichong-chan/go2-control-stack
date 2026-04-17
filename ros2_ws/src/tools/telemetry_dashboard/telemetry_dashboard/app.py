@@ -12,7 +12,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 
-from go2_msgs.msg import ArmAngles, LocomotionCmd, LoopStatus, QDq
+from hq_pcot_msgs.msg import ArmAngles, LocomotionCmd, LoopStatus, QDq
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Int32

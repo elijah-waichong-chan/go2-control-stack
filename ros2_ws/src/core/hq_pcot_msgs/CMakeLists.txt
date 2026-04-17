@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(go2_msgs)
+project(hq_pcot_msgs)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -19,6 +19,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MpcForces.msg"
   "msg/LocomotionCmd.msg"
   "msg/ArmAngles.msg"
+  "msg/ArmCommand.msg"
   "msg/PushEvent.msg"
   "msg/LoopStatus.msg"
   DEPENDENCIES builtin_interfaces std_msgs

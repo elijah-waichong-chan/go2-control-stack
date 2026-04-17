@@ -13,7 +13,7 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
-find_package(go2_msgs REQUIRED)
+find_package(hq_pcot_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(unitree_go REQUIRED)
@@ -57,11 +57,11 @@ target_include_directories(
 
 add_executable(stand_up_init src/stand_up_init.cpp)
 target_link_libraries(stand_up_init locomotion_controller_cpp_common)
-ament_target_dependencies(stand_up_init rclcpp go2_msgs unitree_go)
+ament_target_dependencies(stand_up_init rclcpp hq_pcot_msgs unitree_go)
 
 add_executable(wireless_cmd_bridge src/wireless_cmd_bridge.cpp)
 target_link_libraries(wireless_cmd_bridge locomotion_controller_cpp_common)
-ament_target_dependencies(wireless_cmd_bridge rclcpp go2_msgs unitree_go)
+ament_target_dependencies(wireless_cmd_bridge rclcpp hq_pcot_msgs unitree_go)
 
 add_executable(policy_controller src/policy_controller.cpp)
 target_include_directories(policy_controller PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
@@ -74,7 +74,7 @@ target_link_libraries(
 ament_target_dependencies(
   policy_controller
   ament_index_cpp
-  go2_msgs
+  hq_pcot_msgs
   rclcpp
   unitree_go
 )

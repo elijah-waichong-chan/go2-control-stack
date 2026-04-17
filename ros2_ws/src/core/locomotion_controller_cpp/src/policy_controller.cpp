@@ -15,8 +15,8 @@
 #include <vector>
 
 #include "ament_index_cpp/get_package_share_directory.hpp"
-#include "go2_msgs/msg/locomotion_cmd.hpp"
-#include "go2_msgs/msg/loop_status.hpp"
+#include "hq_pcot_msgs/msg/locomotion_cmd.hpp"
+#include "hq_pcot_msgs/msg/loop_status.hpp"
 #include "locomotion_controller_cpp/common.hpp"
 #include "onnxruntime_cxx_api.h"
 #include "rclcpp/rclcpp.hpp"
@@ -145,16 +145,16 @@ public:
     auto status_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
 
     pub_lowcmd_ = this->create_publisher<unitree_go::msg::LowCmd>(lowcmd_topic_, command_qos);
-    pub_status_ = this->create_publisher<go2_msgs::msg::LoopStatus>(status_topic_, status_qos);
+    pub_status_ = this->create_publisher<hq_pcot_msgs::msg::LoopStatus>(status_topic_, status_qos);
     SetStatus(kStatusIdle);
 
     sub_lowstate_ = this->create_subscription<unitree_go::msg::LowState>(
       lowstate_topic_, sensor_qos,
       std::bind(&PolicyControllerNode::OnLowstate, this, std::placeholders::_1));
-    sub_cmd_ = this->create_subscription<go2_msgs::msg::LocomotionCmd>(
+    sub_cmd_ = this->create_subscription<hq_pcot_msgs::msg::LocomotionCmd>(
       locomotion_cmd_topic_, sensor_qos,
       std::bind(&PolicyControllerNode::OnLocomotionCmd, this, std::placeholders::_1));
-    sub_standing_ = this->create_subscription<go2_msgs::msg::LoopStatus>(
+    sub_standing_ = this->create_subscription<hq_pcot_msgs::msg::LoopStatus>(
       "/status/standing_init", status_qos,
       std::bind(&PolicyControllerNode::OnStandingStatus, this, std::placeholders::_1));
 
@@ -359,13 +359,13 @@ private:
     lowstate_stale_logged_ = false;
   }
 
-  void OnLocomotionCmd(const go2_msgs::msg::LocomotionCmd::SharedPtr msg)
+  void OnLocomotionCmd(const hq_pcot_msgs::msg::LocomotionCmd::SharedPtr msg)
   {
     last_locomotion_cmd_ = msg;
     last_cmd_time_ns_ = this->get_clock()->now().nanoseconds();
   }
 
-  void OnStandingStatus(const go2_msgs::msg::LoopStatus::SharedPtr msg)
+  void OnStandingStatus(const hq_pcot_msgs::msg::LoopStatus::SharedPtr msg)
   {
     standing_ready_ = static_cast<int>(msg->status) == 3;
   }
@@ -736,10 +736,10 @@ private:
   }
 
   rclcpp::Publisher<unitree_go::msg::LowCmd>::SharedPtr pub_lowcmd_;
-  rclcpp::Publisher<go2_msgs::msg::LoopStatus>::SharedPtr pub_status_;
+  rclcpp::Publisher<hq_pcot_msgs::msg::LoopStatus>::SharedPtr pub_status_;
   rclcpp::Subscription<unitree_go::msg::LowState>::SharedPtr sub_lowstate_;
-  rclcpp::Subscription<go2_msgs::msg::LocomotionCmd>::SharedPtr sub_cmd_;
-  rclcpp::Subscription<go2_msgs::msg::LoopStatus>::SharedPtr sub_standing_;
+  rclcpp::Subscription<hq_pcot_msgs::msg::LocomotionCmd>::SharedPtr sub_cmd_;
+  rclcpp::Subscription<hq_pcot_msgs::msg::LoopStatus>::SharedPtr sub_standing_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::TimerBase::SharedPtr status_timer_;
 
@@ -780,7 +780,7 @@ private:
   std::vector<ObservationTerm> obs_terms_;
 
   unitree_go::msg::LowState::SharedPtr last_lowstate_;
-  go2_msgs::msg::LocomotionCmd::SharedPtr last_locomotion_cmd_;
+  hq_pcot_msgs::msg::LocomotionCmd::SharedPtr last_locomotion_cmd_;
   std::optional<std::int64_t> last_lowstate_time_ns_;
   std::optional<std::int64_t> last_cmd_time_ns_;
   bool standing_ready_{false};

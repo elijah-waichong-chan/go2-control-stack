@@ -8,7 +8,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 
-from go2_msgs.msg import ArmAngles
+from hq_pcot_msgs.msg import ArmAngles
 from unitree_arm.msg import ArmString
 from unitree_go.msg import WirelessController
 

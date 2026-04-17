@@ -3,7 +3,7 @@
 #include <optional>
 #include <string>
 
-#include "go2_msgs/msg/loop_status.hpp"
+#include "hq_pcot_msgs/msg/loop_status.hpp"
 #include "locomotion_controller_cpp/common.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "unitree_go/msg/low_cmd.hpp"
@@ -92,8 +92,8 @@ public:
     lowstate_sub_ = this->create_subscription<unitree_go::msg::LowState>(
       "/lowstate", qos, std::bind(&StandUpInitNode::OnLowState, this, std::placeholders::_1));
     status_pub_ =
-      this->create_publisher<go2_msgs::msg::LoopStatus>("/status/standing_init", status_qos);
-    ctrl_status_sub_ = this->create_subscription<go2_msgs::msg::LoopStatus>(
+      this->create_publisher<hq_pcot_msgs::msg::LoopStatus>("/status/standing_init", status_qos);
+    ctrl_status_sub_ = this->create_subscription<hq_pcot_msgs::msg::LoopStatus>(
       "/status/loco_ctrl", status_qos,
       std::bind(&StandUpInitNode::OnCtrlStatus, this, std::placeholders::_1));
 
@@ -147,7 +147,7 @@ private:
     have_state_ = true;
   }
 
-  void OnCtrlStatus(const go2_msgs::msg::LoopStatus::SharedPtr msg)
+  void OnCtrlStatus(const hq_pcot_msgs::msg::LoopStatus::SharedPtr msg)
   {
     if (static_cast<int>(msg->status) != 1 || ctrl_running_)
     {
@@ -257,9 +257,9 @@ private:
   }
 
   rclcpp::Publisher<unitree_go::msg::LowCmd>::SharedPtr lowcmd_pub_;
-  rclcpp::Publisher<go2_msgs::msg::LoopStatus>::SharedPtr status_pub_;
+  rclcpp::Publisher<hq_pcot_msgs::msg::LoopStatus>::SharedPtr status_pub_;
   rclcpp::Subscription<unitree_go::msg::LowState>::SharedPtr lowstate_sub_;
-  rclcpp::Subscription<go2_msgs::msg::LoopStatus>::SharedPtr ctrl_status_sub_;
+  rclcpp::Subscription<hq_pcot_msgs::msg::LoopStatus>::SharedPtr ctrl_status_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::TimerBase::SharedPtr status_timer_;
 

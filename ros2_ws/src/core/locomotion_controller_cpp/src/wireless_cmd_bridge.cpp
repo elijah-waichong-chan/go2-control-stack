@@ -3,8 +3,8 @@
 #include <functional>
 #include <optional>
 
-#include "go2_msgs/msg/locomotion_cmd.hpp"
-#include "go2_msgs/msg/push_event.hpp"
+#include "hq_pcot_msgs/msg/locomotion_cmd.hpp"
+#include "hq_pcot_msgs/msg/push_event.hpp"
 #include "locomotion_controller_cpp/common.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "unitree_go/msg/wireless_controller.hpp"
@@ -40,8 +40,8 @@ public:
     sub_wireless_ = this->create_subscription<unitree_go::msg::WirelessController>(
       "/wirelesscontroller", qos,
       std::bind(&WirelessCmdBridgeNode::OnWireless, this, std::placeholders::_1));
-    pub_cmd_ = this->create_publisher<go2_msgs::msg::LocomotionCmd>("/locomotion_cmd", qos);
-    pub_push_event_ = this->create_publisher<go2_msgs::msg::PushEvent>("/data/push_event", qos);
+    pub_cmd_ = this->create_publisher<hq_pcot_msgs::msg::LocomotionCmd>("/locomotion_cmd", qos);
+    pub_push_event_ = this->create_publisher<hq_pcot_msgs::msg::PushEvent>("/data/push_event", qos);
 
     timer_ = this->create_wall_timer(
       std::chrono::duration<double>(1.0 / std::max(1.0, publish_hz_)),
@@ -83,34 +83,34 @@ private:
   {
     if ((keys & kYMask) != 0)
     {
-      return go2_msgs::msg::PushEvent::UP;
+      return hq_pcot_msgs::msg::PushEvent::UP;
     }
     if ((keys & kAMask) != 0)
     {
-      return go2_msgs::msg::PushEvent::DOWN;
+      return hq_pcot_msgs::msg::PushEvent::DOWN;
     }
     if ((keys & kDpadUpMask) != 0)
     {
-      return go2_msgs::msg::PushEvent::FWD;
+      return hq_pcot_msgs::msg::PushEvent::FWD;
     }
     if ((keys & kDpadDownMask) != 0)
     {
-      return go2_msgs::msg::PushEvent::BACK;
+      return hq_pcot_msgs::msg::PushEvent::BACK;
     }
     if ((keys & kDpadLeftMask) != 0)
     {
-      return go2_msgs::msg::PushEvent::LEFT;
+      return hq_pcot_msgs::msg::PushEvent::LEFT;
     }
     if ((keys & kDpadRightMask) != 0)
     {
-      return go2_msgs::msg::PushEvent::RIGHT;
+      return hq_pcot_msgs::msg::PushEvent::RIGHT;
     }
-    return go2_msgs::msg::PushEvent::NO_PUSH;
+    return hq_pcot_msgs::msg::PushEvent::NO_PUSH;
   }
 
   void PublishPushEvent(const std::uint8_t label)
   {
-    go2_msgs::msg::PushEvent msg;
+    hq_pcot_msgs::msg::PushEvent msg;
     msg.header.stamp = this->now();
     msg.header.frame_id = "wireless_cmd_bridge";
     msg.label = label;
@@ -130,7 +130,7 @@ private:
   {
     if (IsStale())
     {
-      PublishPushEvent(go2_msgs::msg::PushEvent::NO_PUSH);
+      PublishPushEvent(hq_pcot_msgs::msg::PushEvent::NO_PUSH);
       return;
     }
     PublishPushEvent(LabelFromKeys(latest_keys_));
@@ -143,7 +143,7 @@ private:
       return;
     }
 
-    go2_msgs::msg::LocomotionCmd msg;
+    hq_pcot_msgs::msg::LocomotionCmd msg;
     msg.stamp = this->now();
     msg.x_vel = Clamp(ly_ * scale_x_, -std::abs(scale_x_), std::abs(scale_x_));
     msg.y_vel = Clamp(lx_ * scale_y_, -std::abs(scale_y_), std::abs(scale_y_));
@@ -153,8 +153,8 @@ private:
   }
 
   rclcpp::Subscription<unitree_go::msg::WirelessController>::SharedPtr sub_wireless_;
-  rclcpp::Publisher<go2_msgs::msg::LocomotionCmd>::SharedPtr pub_cmd_;
-  rclcpp::Publisher<go2_msgs::msg::PushEvent>::SharedPtr pub_push_event_;
+  rclcpp::Publisher<hq_pcot_msgs::msg::LocomotionCmd>::SharedPtr pub_cmd_;
+  rclcpp::Publisher<hq_pcot_msgs::msg::PushEvent>::SharedPtr pub_push_event_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::TimerBase::SharedPtr push_event_timer_;
 

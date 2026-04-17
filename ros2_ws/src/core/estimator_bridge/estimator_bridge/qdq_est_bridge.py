@@ -14,7 +14,7 @@ from rclpy.qos import (
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import JointState
 
-from go2_msgs.msg import QDq, LoopStatus
+from hq_pcot_msgs.msg import QDq, LoopStatus
 
 
 class QdqEstBridge(Node):

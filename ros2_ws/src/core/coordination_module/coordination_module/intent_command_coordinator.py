@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections import deque
 
 import rclpy
-from go2_msgs.msg import LocomotionCmd
+from hq_pcot_msgs.msg import LocomotionCmd
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from std_msgs.msg import Int32

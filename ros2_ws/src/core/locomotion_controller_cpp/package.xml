@@ -10,7 +10,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>ament_index_cpp</depend>
-  <depend>go2_msgs</depend>
+  <depend>hq_pcot_msgs</depend>
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
   <depend>unitree_go</depend>
