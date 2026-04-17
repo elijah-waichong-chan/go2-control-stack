@@ -1,4 +1,4 @@
-# unitree_arm/msg/ArmAngles.msg
+# Arm state parsed from hardware feedback.
 std_msgs/Header header
 uint32 seq
 uint8 address

@@ -16,10 +16,9 @@ find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/QDq.msg"
-  "msg/MpcForces.msg"
   "msg/LocomotionCmd.msg"
-  "msg/ArmAngles.msg"
-  "msg/ArmCommand.msg"
+  "msg/ArmState.msg"
+  "msg/ArmTarget.msg"
   "msg/PushEvent.msg"
   "msg/LoopStatus.msg"
   DEPENDENCIES builtin_interfaces std_msgs

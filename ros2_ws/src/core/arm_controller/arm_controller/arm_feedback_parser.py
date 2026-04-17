@@ -8,7 +8,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 
-from hq_pcot_msgs.msg import ArmAngles, LoopStatus
+from hq_pcot_msgs.msg import ArmState, LoopStatus
 from unitree_arm.msg import ArmString
 
 
@@ -60,11 +60,11 @@ class ArmFeedbackParser(Node):
         super().__init__("arm_feedback_parser")
 
         self.declare_parameter("feedback_topic", "/arm_Feedback")
-        self.declare_parameter("arm_angles_topic", "/arm_angles")
+        self.declare_parameter("arm_state_topic", "/arm/state")
         self.declare_parameter("status_hz", 10.0)
 
         feedback_topic = str(self.get_parameter("feedback_topic").value)
-        arm_angles_topic = str(self.get_parameter("arm_angles_topic").value)
+        arm_state_topic = str(self.get_parameter("arm_state_topic").value)
         status_hz = max(1.0, float(self.get_parameter("status_hz").value))
 
         qos = QoSProfile(
@@ -83,11 +83,11 @@ class ArmFeedbackParser(Node):
         self.sub_feedback = self.create_subscription(
             ArmString, feedback_topic, self.on_feedback, qos
         )
-        self.pub_angles = self.create_publisher(ArmAngles, arm_angles_topic, qos)
+        self.pub_angles = self.create_publisher(ArmState, arm_state_topic, qos)
         self.pub_status = self.create_publisher(LoopStatus, "/status/arm_parser", status_qos)
         self.status_code = self.STATUS_WAITING_FOR_FEEDBACK
         self.status_timer = self.create_timer(1.0 / status_hz, self.on_status_timer)
-        self.get_logger().info(f"arm_feedback_parser running: {feedback_topic} -> {arm_angles_topic}")
+        self.get_logger().info(f"arm_feedback_parser running: {feedback_topic} -> {arm_state_topic}")
 
     def _set_status(self, status_code: int) -> None:
         self.status_code = int(status_code)
@@ -110,7 +110,7 @@ class ArmFeedbackParser(Node):
         if funcode != 1:
             return
 
-        out = ArmAngles()
+        out = ArmState()
         out.header.stamp = self.get_clock().now().to_msg()
         out.header.frame_id = "arm_feedback_parser"
         out.seq = seq & 0xFFFFFFFF

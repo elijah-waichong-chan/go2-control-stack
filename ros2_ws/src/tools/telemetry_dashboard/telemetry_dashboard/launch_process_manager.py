@@ -14,8 +14,14 @@ _LOCK = threading.Lock()
 _PROCESSES: Dict[str, subprocess.Popen] = {}
 _ARM_FEEDBACK_PARSER_PROCESS = "arm_feedback_parser"
 _ARM_CONTROLLER_MODES = {
-    "current_ik": ("arm_controller", "arm_controller"),
-    "manual_control_ik": ("d1_z_reference_node", "d1_z_reference_node"),
+    "current_ik_ipopt": ("arm_controller", "arm_controller"),
+    "current_ik_drake": ("drake_arm_controller", "drake_arm_controller"),
+    "manual_control_ik_ipopt": ("d1_z_reference_node", "d1_z_reference_node"),
+    "manual_control_ik_drake": ("d1_drake_z_ref_node", "d1_drake_z_ref_node"),
+}
+_ARM_CONTROLLER_MODE_ALIASES = {
+    "current_ik": "current_ik_ipopt",
+    "manual_control_ik": "manual_control_ik_ipopt",
 }
 
 
@@ -140,7 +146,7 @@ def start_rosbag_recording() -> Tuple[bool, str]:
                 str(bag_path),
                 "/data/push_event",
                 "/lowstate",
-                "/arm_angles",
+                "/arm/state",
                 "/joint_states",
                 "/robot_description",
                 "/tf",
@@ -207,11 +213,12 @@ def start_state_converter_stack() -> Tuple[bool, str]:
 
 
 def start_arm_controller() -> Tuple[bool, str]:
-    return start_arm_controller_mode("current_ik")
+    return start_arm_controller_mode("current_ik_ipopt")
 
 
 def start_arm_controller_mode(mode: str) -> Tuple[bool, str]:
     with _LOCK:
+        mode = _ARM_CONTROLLER_MODE_ALIASES.get(mode, mode)
         config = _ARM_CONTROLLER_MODES.get(mode)
         if config is None:
             return False, f"unknown arm controller mode: {mode}"
@@ -393,6 +400,8 @@ def stop_all() -> None:
         "state_converter_stack",
         _ARM_FEEDBACK_PARSER_PROCESS,
         "arm_controller",
+        "drake_arm_controller",
         "d1_z_reference_node",
+        "d1_drake_z_ref_node",
     ):
         stop_launch(name)

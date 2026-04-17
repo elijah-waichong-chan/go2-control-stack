@@ -8,51 +8,27 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 
-from hq_pcot_msgs.msg import ArmState
+from hq_pcot_msgs.msg import ArmState, ArmTarget
 from unitree_arm.msg import ArmString
 from unitree_go.msg import WirelessController
 
-from arm_controller.d1_ik_solver import D1IKSolver
+from arm_controller.d1_drake_ik_solver import D1DrakeIKSolver
 
 
-class D1ZReferenceNode(Node):
-    COMMAND_THRESHOLD_DEG = 0.1
-    COMMAND_COOLDOWN_S = 0.0
+class D1DrakeZReferenceNode(Node):
+    JOINT_PUBLISH_THRESHOLD_DEG = 0.1
     COMMAND_PUBLISH_HZ = 10.0
     WIRELESS_CONTROL_HZ = 30.0
     WIRELESS_INPUT_TIMEOUT_S = 0.2
     IK_SOLVE_LOG_INTERVAL_S = 0.25
     Z_REFERENCE_LOG_INTERVAL_S = 0.25
     SINGLE_JOINT_INDICES = (1, 2, 4)
-    COMMAND_SEQ = 4
-    COMMAND_ADDRESS = 1
-    COMMAND_FUNCODE_FULL_ARM_ANGLE = 2
-    COMMAND_FUNCODE_SINGLE_MODE = 4
-    COMMAND_DELAY_MS = 0
-    COMMAND_MODE_BY_SERVO_ID = {
-        0: 0,
-    }
-    STARTUP_ARM_COMMAND = {
-        "seq": 4,
-        "address": 1,
-        "funcode": 2,
-        "data": {
-            "mode": 0,
-            "angle0": 90,
-            "angle1": -10,
-            "angle2": 10,
-            "angle3": 5,
-            "angle4": -3,
-            "angle5": -90,
-            "angle6": -10,
-        },
-    }
+    STARTUP_ANGLES_DEG = (90.0, -10.0, 10.0, 5.0, -3.0, -90.0, -10.0)
     STARTUP_MODE_DELAY_S = 0.1
     STARTUP_DAMPING_DELAY_S = 3.0
-    JOINT0_MODE_DELAY_S = 1.0
 
     def __init__(self) -> None:
-        super().__init__("d1_z_reference_node")
+        super().__init__("d1_drake_z_ref_node")
 
         self.declare_parameter("arm_state_topic", "/arm/state")
         self.declare_parameter("arm_command_topic", "/arm_Command")
@@ -93,21 +69,22 @@ class D1ZReferenceNode(Node):
             durability=QoSDurabilityPolicy.VOLATILE,
         )
 
-        self.solver = D1IKSolver()
+        self.solver = D1DrakeIKSolver()
+        self.q0_deg: np.ndarray | None = None
         self.q_out: np.ndarray | None = None
         self.latest_q_in: np.ndarray | None = None
         self.z_reference: float | None = None
         self._pending_q_out_solver: np.ndarray | None = None
         self._pending_q_out: np.ndarray | None = None
-        self._nominal_seeded = False
-        self._nominal_seed_ready_at = time.monotonic() + self.STARTUP_DAMPING_DELAY_S
-        self._last_command_time_by_joint: dict[int, float] = {}
-        self._pending_single_mode_timers: list = []
+        self._q0_seeded = False
+        self._q0_ready_at = time.monotonic() + self.STARTUP_DAMPING_DELAY_S
         self._latest_right_stick_y = 0.0
         self._last_wireless_message_time = 0.0
         self._last_wireless_control_time = time.monotonic()
         self._last_ik_solve_log_time = 0.0
         self._last_z_reference_log_time = 0.0
+        self._startup_mode_timer = None
+        self._pending_single_mode_timers: list = []
 
         self.pub_arm_command = self.create_publisher(
             ArmString,
@@ -140,7 +117,7 @@ class D1ZReferenceNode(Node):
         )
 
         self.get_logger().info(
-            "d1_z_reference_node running: "
+            "d1_drake_z_ref_node running: "
             f"{arm_state_topic} + {wireless_topic} -> {arm_command_topic}; "
             f"ry controls z_ref in [{self.z_ref_min_m:.2f}, {self.z_ref_max_m:.2f}] m "
             f"at {self.z_velocity_mps:.2f} m/s"
@@ -156,10 +133,10 @@ class D1ZReferenceNode(Node):
         q_in[3] = -q_in[3]
         self.latest_q_in = q_in.copy()
 
-        if not self._nominal_seeded:
-            if time.monotonic() < self._nominal_seed_ready_at:
+        if not self._q0_seeded:
+            if time.monotonic() < self._q0_ready_at:
                 return
-            if not self.save_current_configuration_as_nominal():
+            if not self.save_current_configuration_as_q0():
                 return
 
     def on_wireless(self, msg: WirelessController) -> None:
@@ -206,15 +183,18 @@ class D1ZReferenceNode(Node):
             self._pending_q_out = None
 
     def solve_and_publish_for_current_reference(self) -> None:
-        if self.latest_q_in is None or self.z_reference is None:
+        if self.latest_q_in is None or self.z_reference is None or self.q0_deg is None:
             return
 
         q_in = self.latest_q_in.copy()
         self._pending_q_out_solver = None
         self._pending_q_out = None
+        target = self.build_up_down_target()
+
         try:
-            q_out_solver = self.solver.solve_with_z_reference(q_in, self.z_reference)
-            solved_z = self.solver.get_end_effector_z(q_out_solver)
+            q_out_solver = self.solver.solve_up_down(q_in, target, self.q0_deg)
+            solved_pose = self.solver.get_end_effector_pose(q_out_solver)
+            solved_z = float(solved_pose.translation()[2])
             z_error = solved_z - self.z_reference
             q_out = q_out_solver.copy()
             q_out[0] = -q_out[0]
@@ -226,32 +206,44 @@ class D1ZReferenceNode(Node):
             if (now - self._last_ik_solve_log_time) >= self.IK_SOLVE_LOG_INTERVAL_S:
                 self._last_ik_solve_log_time = now
                 self.get_logger().info(
-                    "Manual IK solved z target: "
+                    "Manual Drake IK solved z target: "
                     f"target={self.z_reference:.4f} m, "
                     f"solved={solved_z:.4f} m, "
                     f"error={z_error:.4f} m"
                 )
         except RuntimeError as exc:
-            self.get_logger().warning(f"IK solve failed: {exc}")
+            self.get_logger().warning(f"Drake IK solve failed: {exc}")
 
-    def save_current_configuration_as_nominal(self) -> bool:
-        """Use the latest measured arm configuration as the nominal pose."""
+    def save_current_configuration_as_q0(self) -> bool:
         if self.latest_q_in is None:
             self.get_logger().warning(
-                "Cannot save nominal arm configuration before receiving /arm/state"
+                "Cannot save q0 arm configuration before receiving /arm/state"
             )
             return False
 
-        self.solver.save_current_configuration_as_nominal(self.latest_q_in)
-        nominal_z_reference = float(self.solver.nominal_end_effector_z)
-        self.z_reference = self.clamp_z_reference(nominal_z_reference)
-        self._nominal_seeded = True
+        self.q0_deg = self.latest_q_in.copy()
+        q0_pose = self.solver.get_end_effector_pose(self.q0_deg)
+        self.z_reference = self.clamp_z_reference(float(q0_pose.translation()[2]))
+        self._q0_seeded = True
         self.get_logger().info(
-            "Saved current arm configuration as nominal: "
-            + np.array2string(self.latest_q_in, precision=2, separator=", ")
+            "Saved current arm configuration as q0: "
+            + np.array2string(self.q0_deg, precision=2, separator=", ")
             + f"; z_ref={self.z_reference:.4f}"
         )
         return True
+
+    def build_up_down_target(self) -> ArmTarget:
+        q0_pose = self.solver.get_end_effector_pose(self.q0_deg)
+        target = ArmTarget()
+        target.command_type = ArmTarget.COMMAND_TYPE_END_EFFECTOR_POSE
+        target.header.frame_id = self.solver.BASE_FRAME
+        target.position_m = [
+            float(q0_pose.translation()[0]),
+            float(q0_pose.translation()[1]),
+            float(self.z_reference),
+        ]
+        target.orientation_xyzw = [0.0, 0.0, 0.0, 0.0]
+        return target
 
     def clamp_z_reference(self, z_reference: float) -> float:
         return min(self.z_ref_max_m, max(self.z_ref_min_m, z_reference))
@@ -270,19 +262,12 @@ class D1ZReferenceNode(Node):
         q_out_solver: np.ndarray,
         q_out: np.ndarray,
     ) -> bool:
-        now = time.monotonic()
         joints_to_update: list[int] = []
 
         for joint_index in self.SINGLE_JOINT_INDICES:
-            last_command_time = self._last_command_time_by_joint.get(joint_index)
-            if (
-                last_command_time is not None
-                and (now - last_command_time) < self.COMMAND_COOLDOWN_S
-            ):
-                continue
             if (
                 abs(float(q_in[joint_index]) - float(q_out_solver[joint_index]))
-                <= self.COMMAND_THRESHOLD_DEG
+                <= self.JOINT_PUBLISH_THRESHOLD_DEG
             ):
                 continue
             joints_to_update.append(joint_index)
@@ -291,37 +276,17 @@ class D1ZReferenceNode(Node):
             return False
 
         self.publish_group_joint_command(q_out)
-
-        for joint_index in joints_to_update:
-            self._last_command_time_by_joint[joint_index] = now
-
         return True
 
-    def publish_group_joint_command(
-        self,
-        q_out: np.ndarray,
-    ) -> None:
-        startup_angles = self.STARTUP_ARM_COMMAND["data"]
-        target_angles_deg = np.asarray(
-            [
-                startup_angles["angle0"],
-                startup_angles["angle1"],
-                startup_angles["angle2"],
-                startup_angles["angle3"],
-                startup_angles["angle4"],
-                startup_angles["angle5"],
-                startup_angles["angle6"],
-            ],
-            dtype=float,
-        )
-
+    def publish_group_joint_command(self, q_out: np.ndarray) -> None:
+        target_angles_deg = np.asarray(self.STARTUP_ANGLES_DEG, dtype=float).copy()
         for joint_index in self.SINGLE_JOINT_INDICES:
             target_angles_deg[joint_index] = float(q_out[joint_index])
 
         payload = {
-            "seq": self.COMMAND_SEQ,
-            "address": self.COMMAND_ADDRESS,
-            "funcode": self.COMMAND_FUNCODE_FULL_ARM_ANGLE,
+            "seq": 4,
+            "address": 1,
+            "funcode": 2,
             "data": {
                 "mode": 0,
                 "angle0": float(target_angles_deg[0]),
@@ -331,7 +296,7 @@ class D1ZReferenceNode(Node):
                 "angle4": float(target_angles_deg[4]),
                 "angle5": float(target_angles_deg[5]),
                 "angle6": float(target_angles_deg[6]),
-                "delay_ms": self.COMMAND_DELAY_MS,
+                "delay_ms": 0,
             },
         }
         msg = ArmString()
@@ -355,23 +320,37 @@ class D1ZReferenceNode(Node):
         self._pending_single_mode_timers.append(timer)
 
     def publish_single_mode_command(self) -> None:
-        for servo_id, mode_value in self.COMMAND_MODE_BY_SERVO_ID.items():
-            payload = {
-                "seq": self.COMMAND_SEQ,
-                "address": self.COMMAND_ADDRESS,
-                "funcode": self.COMMAND_FUNCODE_SINGLE_MODE,
-                "data": {
-                    "id": servo_id,
-                    "mode": mode_value,
-                },
-            }
-            msg = ArmString()
-            msg.data = json.dumps(payload, separators=(",", ":"))
-            self.pub_arm_command.publish(msg)
+        payload = {
+            "seq": 4,
+            "address": 1,
+            "funcode": 4,
+            "data": {
+                "id": 0,
+                "mode": 0,
+            },
+        }
+        msg = ArmString()
+        msg.data = json.dumps(payload, separators=(",", ":"))
+        self.pub_arm_command.publish(msg)
 
     def publish_startup_arm_command(self) -> None:
+        payload = {
+            "seq": 4,
+            "address": 1,
+            "funcode": 2,
+            "data": {
+                "mode": 0,
+                "angle0": self.STARTUP_ANGLES_DEG[0],
+                "angle1": self.STARTUP_ANGLES_DEG[1],
+                "angle2": self.STARTUP_ANGLES_DEG[2],
+                "angle3": self.STARTUP_ANGLES_DEG[3],
+                "angle4": self.STARTUP_ANGLES_DEG[4],
+                "angle5": self.STARTUP_ANGLES_DEG[5],
+                "angle6": self.STARTUP_ANGLES_DEG[6],
+            },
+        }
         msg = ArmString()
-        msg.data = json.dumps(self.STARTUP_ARM_COMMAND, separators=(",", ":"))
+        msg.data = json.dumps(payload, separators=(",", ":"))
         self.pub_arm_command.publish(msg)
 
     def publish_startup_single_mode_command(self) -> None:
@@ -383,29 +362,13 @@ class D1ZReferenceNode(Node):
         self.publish_startup_arm_command()
         self.schedule_single_mode_command(self.STARTUP_DAMPING_DELAY_S)
         self.get_logger().info(
-            "Published startup arm command: "
-            + json.dumps(self.STARTUP_ARM_COMMAND, separators=(",", ":"))
-            + f"; scheduled startup single mode commands in {self.STARTUP_DAMPING_DELAY_S:.1f}s: "
-            + ", ".join(
-                json.dumps(
-                    {
-                        "seq": self.COMMAND_SEQ,
-                        "address": self.COMMAND_ADDRESS,
-                        "funcode": self.COMMAND_FUNCODE_SINGLE_MODE,
-                        "data": {
-                            "id": servo_id,
-                            "mode": mode_value,
-                        },
-                    },
-                    separators=(",", ":"),
-                )
-                for servo_id, mode_value in self.COMMAND_MODE_BY_SERVO_ID.items()
-            )
+            "Published startup arm command and scheduled joint0 single mode setup"
         )
+
 
 def main() -> None:
     rclpy.init()
-    node = D1ZReferenceNode()
+    node = D1DrakeZReferenceNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

@@ -10,7 +10,7 @@ import time
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from hq_pcot_msgs.msg import ArmAngles, LoopStatus
+from hq_pcot_msgs.msg import ArmState, LoopStatus
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -92,7 +92,7 @@ class UpDownIntentEstimatorNode(Node):
 
         self.model_dir = default_model_dir.expanduser()
         self.lowstate_topic = "/lowstate"
-        self.arm_angles_topic = "/arm_angles"
+        self.arm_state_topic = "/arm/state"
         self.output_topic = "/direction_intent/up_down"
         self.status_topic = "/status/intent_estimator/up_down"
         self.status_hz = 10.0
@@ -139,7 +139,7 @@ class UpDownIntentEstimatorNode(Node):
         if self.requires_lowstate:
             self.input_topics.append(self.lowstate_topic)
         if self.requires_arm_angles:
-            self.input_topics.append(self.arm_angles_topic)
+            self.input_topics.append(self.arm_state_topic)
         self.have_lowstate = False
         self.have_arm_angles = False
         self.latest_arm_angles: list[float] = [0.0] * 7
@@ -174,7 +174,7 @@ class UpDownIntentEstimatorNode(Node):
         self.sub_arm_angles = None
         if self.requires_arm_angles:
             self.sub_arm_angles = self.create_subscription(
-                ArmAngles, self.arm_angles_topic, self.on_arm_angles, sensor_qos
+                ArmState, self.arm_state_topic, self.on_arm_angles, sensor_qos
             )
         self.pub_intent = self.create_publisher(Int32, self.output_topic, 10)
         self.pub_status = self.create_publisher(LoopStatus, self.status_topic, status_qos)
@@ -285,7 +285,7 @@ class UpDownIntentEstimatorNode(Node):
         if self.requires_lowstate and not self.have_lowstate:
             missing_topics.append(self.lowstate_topic)
         if self.requires_arm_angles and not self.have_arm_angles:
-            missing_topics.append(self.arm_angles_topic)
+            missing_topics.append(self.arm_state_topic)
         return missing_topics
 
     def _build_source_vectors(self, lowstate_msg: LowState | None) -> dict[str, object]:
@@ -313,7 +313,7 @@ class UpDownIntentEstimatorNode(Node):
             raise ValueError(f"Unsupported up_down deploy feature: {feature.name}")
         return source_vectors
 
-    def on_arm_angles(self, msg: ArmAngles) -> None:
+    def on_arm_angles(self, msg: ArmState) -> None:
         self.latest_arm_angles = [float(value) for value in msg.angle_deg]
         self.latest_arm_currents = [float(value) for value in msg.current]
         self.have_arm_angles = True
@@ -344,12 +344,12 @@ class UpDownIntentEstimatorNode(Node):
                 )
             if self.requires_arm_angles and len(self.latest_arm_angles) != 7:
                 raise ValueError(
-                    "Expected latest /arm_angles angle_deg to have length 7, got "
+                    "Expected latest /arm/state angle_deg to have length 7, got "
                     f"{len(self.latest_arm_angles)}"
                 )
             if self.requires_arm_angles and len(self.latest_arm_currents) != 7:
                 raise ValueError(
-                    "Expected latest /arm_angles current to have length 7, got "
+                    "Expected latest /arm/state current to have length 7, got "
                     f"{len(self.latest_arm_currents)}"
                 )
             if self._missing_topics():

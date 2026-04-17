@@ -12,7 +12,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 
-from hq_pcot_msgs.msg import ArmAngles, LocomotionCmd, LoopStatus, QDq
+from hq_pcot_msgs.msg import ArmState, LocomotionCmd, LoopStatus, QDq
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Int32
@@ -93,7 +93,7 @@ class TelemetryNode(Node):
             "lowcmd": "/lowcmd",
             "joint_states": "/joint_states",
             "tf": "/tf",
-            "arm_angles": "/arm_angles",
+            "arm_state": "/arm/state",
             "arm_feedback": "/arm_Feedback",
             "arm_command": "/arm_Command",
             "intent_forward_backward": "/direction_intent/front_back",
@@ -117,7 +117,7 @@ class TelemetryNode(Node):
         self.create_subscription(
             TFMessage, self._topic_names["tf"], self.on_tf, qos
         )
-        self.create_subscription(ArmAngles, self._topic_names["arm_angles"], self.on_arm_angles, qos)
+        self.create_subscription(ArmState, self._topic_names["arm_state"], self.on_arm_angles, qos)
         self.create_subscription(
             ArmString, self._topic_names["arm_feedback"], self.on_arm_feedback, qos
         )
@@ -232,8 +232,8 @@ class TelemetryNode(Node):
     def on_tf(self, msg: TFMessage) -> None:
         self._mark_topic("tf")
 
-    def on_arm_angles(self, msg: ArmAngles) -> None:
-        self._mark_topic("arm_angles")
+    def on_arm_angles(self, msg: ArmState) -> None:
+        self._mark_topic("arm_state")
 
     def on_arm_feedback(self, msg: ArmString) -> None:
         self._mark_topic("arm_feedback")
@@ -870,11 +870,17 @@ def _render_sidebar(node: TelemetryNode) -> None:
     enable_wireless_cmd_bridge = st.session_state.get("ctrl_enable_wireless_cmd_bridge", True)
     arm_controller_mode = st.session_state.get(
         "arm_controller_mode",
-        "current_ik",
+        "current_ik_ipopt",
     )
+    if arm_controller_mode == "current_ik":
+        arm_controller_mode = "current_ik_ipopt"
+    elif arm_controller_mode == "manual_control_ik":
+        arm_controller_mode = "manual_control_ik_ipopt"
     arm_controller_mode_labels = {
-        "current_ik": "Current IK",
-        "manual_control_ik": "Manual z-ref IK",
+        "current_ik_ipopt": "Current IK (IPOPT)",
+        "current_ik_drake": "Current IK (Drake)",
+        "manual_control_ik_ipopt": "Manual z-ref IK (IPOPT)",
+        "manual_control_ik_drake": "Manual z-ref IK (Drake)",
     }
     enable_front_back_estimator = st.session_state.get(
         "ctrl_enable_front_back_estimator", True
@@ -1051,7 +1057,7 @@ def _render_sidebar(node: TelemetryNode) -> None:
             index=list(arm_controller_mode_labels.keys()).index(
                 arm_controller_mode
                 if arm_controller_mode in arm_controller_mode_labels
-                else "current_ik"
+                else "current_ik_ipopt"
             ),
             format_func=lambda value: arm_controller_mode_labels[value],
             key="arm_controller_mode",
@@ -1170,7 +1176,7 @@ def _render_dashboard(node: TelemetryNode) -> None:
             "Arm",
             [
                 ("arm_feedback", "arm_feedback"),
-                ("arm_angles", "arm_angles"),
+                ("arm_state", "arm_state"),
                 ("arm_command", "arm_command"),
             ],
         ),

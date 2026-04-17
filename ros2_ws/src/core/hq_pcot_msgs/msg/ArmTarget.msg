@@ -1,6 +1,6 @@
 std_msgs/Header header
 
-# Command interpretation
+# Target interpretation
 uint8 COMMAND_TYPE_UNSPECIFIED=0
 uint8 COMMAND_TYPE_END_EFFECTOR_POSE=1
 uint8 COMMAND_TYPE_JOINT_CONFIGURATION=2
