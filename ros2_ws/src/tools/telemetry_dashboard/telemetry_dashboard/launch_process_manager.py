@@ -12,8 +12,9 @@ from typing import Dict, Sequence, Tuple
 
 _LOCK = threading.Lock()
 _PROCESSES: Dict[str, subprocess.Popen] = {}
+_ARM_FEEDBACK_PARSER_PROCESS = "arm_feedback_parser"
 _ARM_CONTROLLER_MODES = {
-    "current_ik": ("d1_ik_node", "d1_ik_node"),
+    "current_ik": ("arm_controller", "arm_controller"),
     "manual_control_ik": ("d1_z_reference_node", "d1_z_reference_node"),
 }
 
@@ -156,8 +157,11 @@ def start_rosbag_recording() -> Tuple[bool, str]:
 def start_state_converter_stack() -> Tuple[bool, str]:
     with _LOCK:
         _cleanup_stale("state_converter_stack")
-        _cleanup_stale("arm_controller")
-        if "state_converter_stack" in _PROCESSES or "arm_controller" in _PROCESSES:
+        _cleanup_stale(_ARM_FEEDBACK_PARSER_PROCESS)
+        if (
+            "state_converter_stack" in _PROCESSES
+            or _ARM_FEEDBACK_PARSER_PROCESS in _PROCESSES
+        ):
             return False, "state converter stack already running"
 
         started_names: list[str] = []
@@ -172,13 +176,13 @@ def start_state_converter_stack() -> Tuple[bool, str]:
             started_names.append("state_converter_stack")
 
             ok, msg = _start_process(
-                "arm_controller",
+                _ARM_FEEDBACK_PARSER_PROCESS,
                 ["ros2", "run", "arm_controller", "arm_feedback_parser"],
                 "started arm_controller arm_feedback_parser",
             )
             if not ok:
                 raise RuntimeError(msg)
-            started_names.append("arm_controller")
+            started_names.append(_ARM_FEEDBACK_PARSER_PROCESS)
         except Exception as exc:
             for name in reversed(started_names):
                 proc = _PROCESSES.get(name)
@@ -259,7 +263,7 @@ def stop_launch(name: str) -> Tuple[bool, str]:
 def stop_state_converter_stack() -> Tuple[bool, str]:
     results: list[str] = []
     any_running = False
-    for name in ("state_converter_stack", "arm_controller"):
+    for name in ("state_converter_stack", _ARM_FEEDBACK_PARSER_PROCESS):
         ok, msg = stop_launch(name)
         if ok:
             any_running = True
@@ -387,8 +391,8 @@ def stop_all() -> None:
         "foxglove_bridge",
         "rosbag_recording",
         "state_converter_stack",
+        _ARM_FEEDBACK_PARSER_PROCESS,
         "arm_controller",
-        "d1_ik_node",
         "d1_z_reference_node",
     ):
         stop_launch(name)

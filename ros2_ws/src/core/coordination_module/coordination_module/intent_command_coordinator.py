@@ -18,7 +18,7 @@ class IntentCommandCoordinator(Node):
     def __init__(self) -> None:
         super().__init__("intent_command_coordinator")
 
-        self.declare_parameter("forward_backward_intent_topic", "/direction_intent/forward_backward")
+        self.declare_parameter("forward_backward_intent_topic", "/direction_intent/front_back")
         self.declare_parameter("left_right_intent_topic", "/direction_intent/left_right")
         self.declare_parameter("locomotion_cmd_topic", "/locomotion_cmd")
         self.declare_parameter("publish_hz", 50.0)

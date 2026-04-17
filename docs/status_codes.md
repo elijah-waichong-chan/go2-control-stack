@@ -70,7 +70,7 @@ Source: `intent_estimator/left_right_intent_estimator.py`
 - `1`: running
 - `2`: waiting for required input topics
 
-### `/status/intent_estimator/forward_backward`
+### `/status/intent_estimator/front_back`
 
 Message type: `go2_msgs/LoopStatus`
 
@@ -92,7 +92,7 @@ Source: `intent_estimator/up_down_intent_estimator.py`
 
 The telemetry dashboard derives the "Intent Estimator" card from the freshest recent status among:
 
-- `/status/intent_estimator/forward_backward`
+- `/status/intent_estimator/front_back`
 - `/status/intent_estimator/left_right`
 - `/status/intent_estimator/up_down`
 

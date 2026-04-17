@@ -7,33 +7,34 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
-from std_msgs.msg import String
 
 from go2_msgs.msg import ArmAngles
+from std_msgs.msg import Int32
 from unitree_arm.msg import ArmString
 
 from arm_controller.d1_ik_solver import D1IKSolver
 
 
-class D1IKNode(Node):
+class ArmControllerNode(Node):
     COMMAND_THRESHOLD_DEG = 0.1
     COMMAND_COOLDOWN_S = 0
     SINGLE_JOINT_INDICES = (1, 2, 3, 4, 5)
     FIXED_GRIPPER_SERVO_ID = 6
     FIXED_GRIPPER_ANGLE_DEG = -20.0
-    FIXED_JOINT1_JOINT5_RANGE_DEG = (-85.0, -105.0)
-    UP_DOWN_JOINT5_RANGE_DEG = (-10.0, 10.0)
+    FIXED_JOINT1_JOINT5_RANGE_DEG = (-5.0, 5.0)
+    UP_DOWN_JOINT5_RANGE_DEG = (-85.0, 105.0)
     UP_DOWN_IK_PUBLISH_JOINT_INDICES = (1, 2, 4)
     JOINT4_CURRENT_TRANSITION_THRESHOLD = 100.0
     JOINT0_TARGET_DEG = 90.0
     JOINT5_CURRENT_SWITCH_THRESHOLD = 30.0
     MODE_SWITCH_COOLDOWN_S = 3.0
-    MODE_SWITCH_JOINT_ID = 3
-    MODE_SWITCH_UP_DOWN_TARGET_DEG = 5.0
-    MODE_SWITCH_FIXED_JOINT1_TARGET_DEG = 95.0
     MODE_SWITCH_UP_DOWN_JOINT5_TARGET_DEG = -90.0
-    FIXED_JOINT1_MODE = "fixed_joint1"
-    UP_DOWN_MODE = "up_down"
+    MODE_SWITCH_FRONT_BACK_JOINT5_TARGET_DEG = 0.0
+    FRONT_BACK_MODE = "front_back_mode"
+    UP_DOWN_MODE = "up_down_mode"
+    UP_DOWN_IDLE_INTENT_LABEL = 0
+    UP_DOWN_INCREASE_INTENT_LABEL = 5
+    UP_DOWN_DECREASE_INTENT_LABEL = 6
     COMMAND_SEQ = 4
     COMMAND_ADDRESS = 1
     COMMAND_FUNCODE_SINGLE_SERVO_ANGLE = 1
@@ -52,9 +53,9 @@ class D1IKNode(Node):
             "angle0": 90,
             "angle1": -10,
             "angle2": 10,
-            "angle3": 95,
+            "angle3": 5,
             "angle4": -3,
-            "angle5": -90,
+            "angle5": 0,
             "angle6": FIXED_GRIPPER_ANGLE_DEG,
         },
     }
@@ -62,15 +63,22 @@ class D1IKNode(Node):
     STARTUP_DAMPING_DELAY_S = 3.0
     JOINT0_MODE_DELAY_S = 1.0
     UP_DOWN_Z_REFERENCE_LOG_INTERVAL_S = 0.25
-    UP_DOWN_JOINT4_ERROR_THRESHOLD_DEG = 1.0
-    UP_DOWN_JOINT4_ERROR_RECHECK_DELAY_S = 0.3
 
     def __init__(self) -> None:
-        super().__init__("d1_ik_node")
+        super().__init__("arm_controller")
 
-        self.declare_parameter("up_down_z_velocity_mps", 0.2)
+        self.declare_parameter("up_down_z_velocity_mps", 0.05)
         self.declare_parameter("up_down_z_ref_min_m", -0.09)
         self.declare_parameter("up_down_z_ref_max_m", 0.56)
+        self.declare_parameter("up_down_intent_topic", "/direction_intent/up_down")
+        self.declare_parameter("up_down_idle_intent_label", self.UP_DOWN_IDLE_INTENT_LABEL)
+        self.declare_parameter(
+            "up_down_increase_intent_label", self.UP_DOWN_INCREASE_INTENT_LABEL
+        )
+        self.declare_parameter(
+            "up_down_decrease_intent_label", self.UP_DOWN_DECREASE_INTENT_LABEL
+        )
+        self.declare_parameter("up_down_intent_timeout_s", 0.5)
 
         self.up_down_z_velocity_mps = abs(
             float(self.get_parameter("up_down_z_velocity_mps").value)
@@ -80,6 +88,19 @@ class D1IKNode(Node):
         )
         self.up_down_z_ref_max_m = float(
             self.get_parameter("up_down_z_ref_max_m").value
+        )
+        self.up_down_intent_topic = str(self.get_parameter("up_down_intent_topic").value)
+        self.up_down_idle_intent_label = int(
+            self.get_parameter("up_down_idle_intent_label").value
+        )
+        self.up_down_increase_intent_label = int(
+            self.get_parameter("up_down_increase_intent_label").value
+        )
+        self.up_down_decrease_intent_label = int(
+            self.get_parameter("up_down_decrease_intent_label").value
+        )
+        self.up_down_intent_timeout_s = max(
+            0.0, float(self.get_parameter("up_down_intent_timeout_s").value)
         )
         if self.up_down_z_ref_min_m > self.up_down_z_ref_max_m:
             self.up_down_z_ref_min_m, self.up_down_z_ref_max_m = (
@@ -97,9 +118,7 @@ class D1IKNode(Node):
         self.solver = D1IKSolver()
         self.q_out: np.ndarray | None = None
         self.latest_q_in: np.ndarray | None = None
-        self.latest_joint4_angle_deg: float | None = None
         self.latest_gripper_angle_deg: float | None = None
-        self._last_commanded_joint4_angle_deg: float | None = None
         self.x_vel = 0.0
         self._active_solver_mode: str | None = None
         self._nominal_seeded = False
@@ -112,7 +131,8 @@ class D1IKNode(Node):
         self._up_down_y_reference: float | None = None
         self._last_up_down_control_time: float | None = None
         self._last_up_down_z_reference_log_time = 0.0
-        self._next_up_down_joint4_error_check_time = 0.0
+        self._latest_up_down_intent: int | None = None
+        self._last_up_down_intent_time: float | None = None
         self._last_command_time_by_joint: dict[int, float] = {}
         self._pending_single_mode_timers: list = []
 
@@ -121,31 +141,32 @@ class D1IKNode(Node):
             "/arm_Command",
             qos,
         )
-        self.pub_arm_ik_debug = self.create_publisher(
-            String,
-            "/arm_ik_debug",
-            qos,
-        )
         self.sub_arm_angles = self.create_subscription(
             ArmAngles,
             "/arm_angles",
             self.on_arm_angles,
             qos,
         )
+        self.sub_up_down_intent = self.create_subscription(
+            Int32,
+            self.up_down_intent_topic,
+            self.on_up_down_intent,
+            10,
+        )
         self._startup_mode_timer = self.create_timer(
             self.STARTUP_MODE_DELAY_S,
             self.publish_startup_single_mode_command,
         )
-
-        self.get_logger().info("d1_ik_node listening on /arm_angles and publishing /arm_ik_debug")
+        self.get_logger().info(
+            "arm_controller listening on /arm_angles and "
+            f"{self.up_down_intent_topic}"
+        )
 
     def on_arm_angles(self, msg: ArmAngles) -> None:
         if len(msg.angle_deg) == 0:
             return
 
         current_q = np.asarray(msg.angle_deg[:6], dtype=float)
-        if len(msg.angle_deg) > 4:
-            self.latest_joint4_angle_deg = float(msg.angle_deg[4])
         if len(msg.angle_deg) > self.FIXED_GRIPPER_SERVO_ID:
             self.latest_gripper_angle_deg = float(msg.angle_deg[self.FIXED_GRIPPER_SERVO_ID])
         # self.handle_joint0_limits(current_q)
@@ -173,6 +194,10 @@ class D1IKNode(Node):
             self.publish_arm_commands(q_in, q_out_solver, q_out)
         except RuntimeError as exc:
             self.get_logger().warning(f"IK solve failed: {exc}")
+
+    def on_up_down_intent(self, msg: Int32) -> None:
+        self._latest_up_down_intent = int(msg.data)
+        self._last_up_down_intent_time = time.monotonic()
 
     def save_current_configuration_as_nominal(self) -> bool:
         """Replace the solver nominal state with the latest measured arm state."""
@@ -208,7 +233,6 @@ class D1IKNode(Node):
         self._up_down_y_reference = None
         self._up_down_z_reference = None
         self._last_up_down_control_time = None
-        self._next_up_down_joint4_error_check_time = 0.0
 
     def clamp_up_down_z_reference(self, z_reference: float) -> float:
         return min(
@@ -216,7 +240,7 @@ class D1IKNode(Node):
             max(self.up_down_z_ref_min_m, z_reference),
         )
 
-    def update_up_down_z_reference_from_joint4_error(self, now: float) -> None:
+    def update_up_down_z_reference_from_intent(self, now: float) -> None:
         if self._up_down_z_reference is None:
             return
 
@@ -230,24 +254,23 @@ class D1IKNode(Node):
             return
         if now < self._next_mode_switch_time:
             return
-        if now < self._next_up_down_joint4_error_check_time:
+        if self.up_down_z_velocity_mps <= 0.0:
             return
 
         if (
-            self.latest_joint4_angle_deg is None
-            or self._last_commanded_joint4_angle_deg is None
-            or self.up_down_z_velocity_mps <= 0.0
+            self._latest_up_down_intent is None
+            or self._last_up_down_intent_time is None
+            or (now - self._last_up_down_intent_time) > self.up_down_intent_timeout_s
         ):
             return
 
-        joint4_error_deg = (
-            self.latest_joint4_angle_deg - self._last_commanded_joint4_angle_deg
-        )
         direction = 0.0
-        if joint4_error_deg < -self.UP_DOWN_JOINT4_ERROR_THRESHOLD_DEG:
+        if self._latest_up_down_intent == self.up_down_increase_intent_label:
             direction = 1.0
-        elif joint4_error_deg > self.UP_DOWN_JOINT4_ERROR_THRESHOLD_DEG:
+        elif self._latest_up_down_intent == self.up_down_decrease_intent_label:
             direction = -1.0
+        elif self._latest_up_down_intent == self.up_down_idle_intent_label:
+            direction = 0.0
 
         if direction == 0.0:
             return
@@ -259,18 +282,13 @@ class D1IKNode(Node):
             return
 
         self._up_down_z_reference = updated_z_reference
-        self._next_up_down_joint4_error_check_time = (
-            now + self.UP_DOWN_JOINT4_ERROR_RECHECK_DELAY_S
-        )
         if (
             now - self._last_up_down_z_reference_log_time
         ) >= self.UP_DOWN_Z_REFERENCE_LOG_INTERVAL_S:
             self._last_up_down_z_reference_log_time = now
             self.get_logger().info(
-                "Updated up_down z reference from joint4 heuristic: "
-                f"joint4_current={self.latest_joint4_angle_deg:.2f} deg, "
-                f"joint4_cmd={self._last_commanded_joint4_angle_deg:.2f} deg, "
-                f"joint4_error={joint4_error_deg:.2f} deg, "
+                "Updated up_down z reference from intent: "
+                f"intent={self._latest_up_down_intent}, "
                 f"z_ref={self._up_down_z_reference:.4f} m"
             )
 
@@ -284,10 +302,10 @@ class D1IKNode(Node):
         if current_mode is None:
             current_mode = self._infer_mode_from_joint5_angle(float(q_in[5]))
         if current_mode is None:
-            current_mode = self.FIXED_JOINT1_MODE
+            current_mode = self.FRONT_BACK_MODE
 
         next_solver_mode = current_mode
-        mode_switch_target: float | None = None
+        mode_switch_joint5_target: float | None = None
         now = time.monotonic()
 
         if joint5_current > self.JOINT5_CURRENT_SWITCH_THRESHOLD:
@@ -295,27 +313,22 @@ class D1IKNode(Node):
                 not self._joint5_current_switch_latched
                 and now >= self._next_mode_switch_time
             ):
-                if current_mode == self.FIXED_JOINT1_MODE:
+                if current_mode == self.FRONT_BACK_MODE:
                     next_solver_mode = self.UP_DOWN_MODE
-                    mode_switch_target = self.MODE_SWITCH_UP_DOWN_TARGET_DEG
+                    mode_switch_joint5_target = self.MODE_SWITCH_UP_DOWN_JOINT5_TARGET_DEG
                 else:
-                    next_solver_mode = self.FIXED_JOINT1_MODE
-                    mode_switch_target = self.MODE_SWITCH_FIXED_JOINT1_TARGET_DEG
+                    next_solver_mode = self.FRONT_BACK_MODE
+                    mode_switch_joint5_target = self.MODE_SWITCH_FRONT_BACK_JOINT5_TARGET_DEG
                 self._joint5_current_switch_latched = True
         else:
             self._joint5_current_switch_latched = False
 
         if current_mode != next_solver_mode:
-            if mode_switch_target is not None:
+            if mode_switch_joint5_target is not None:
                 self.publish_single_joint_command(
-                    self.MODE_SWITCH_JOINT_ID,
-                    mode_switch_target,
+                    5,
+                    mode_switch_joint5_target,
                 )
-                if next_solver_mode == self.UP_DOWN_MODE:
-                    self.publish_single_joint_command(
-                        5,
-                        self.MODE_SWITCH_UP_DOWN_JOINT5_TARGET_DEG,
-                    )
             self.save_current_configuration_as_nominal()
             if next_solver_mode == self.UP_DOWN_MODE:
                 self.capture_up_down_references()
@@ -324,7 +337,7 @@ class D1IKNode(Node):
             self._next_mode_switch_time = now + self.MODE_SWITCH_COOLDOWN_S
 
         self._active_solver_mode = next_solver_mode
-        if next_solver_mode == self.FIXED_JOINT1_MODE:
+        if next_solver_mode == self.FRONT_BACK_MODE:
             return self.solver.solve_with_fixed_joint1(q_in)
         if next_solver_mode == self.UP_DOWN_MODE:
             if (
@@ -333,7 +346,7 @@ class D1IKNode(Node):
                 or self._up_down_z_reference is None
             ):
                 self.capture_up_down_references()
-            self.update_up_down_z_reference_from_joint4_error(now)
+            self.update_up_down_z_reference_from_intent(now)
             return self.solver.solve_up_down(
                 q_in,
                 self._up_down_z_reference,
@@ -345,7 +358,7 @@ class D1IKNode(Node):
     def _infer_mode_from_joint5_angle(self, joint5_angle: float) -> str | None:
         """Infer a startup mode from the current joint-5 angle."""
         if self._angle_in_range(joint5_angle, self.FIXED_JOINT1_JOINT5_RANGE_DEG):
-            return self.FIXED_JOINT1_MODE
+            return self.FRONT_BACK_MODE
         if self._angle_in_range(joint5_angle, self.UP_DOWN_JOINT5_RANGE_DEG):
             return self.UP_DOWN_MODE
         return None
@@ -428,9 +441,6 @@ class D1IKNode(Node):
         if not joints_to_update and not gripper_needs_update:
             return
 
-        if joints_to_update:
-            self.publish_arm_ik_debug(q_out)
-
         joints_to_publish = joints_to_update
         if 4 in joints_to_publish:
             joints_to_publish = [4] + [
@@ -447,8 +457,6 @@ class D1IKNode(Node):
 
         for joint_index in joints_to_publish:
             self.publish_single_joint_command(joint_index, float(q_out[joint_index]))
-            if joint_index == 4:
-                self._last_commanded_joint4_angle_deg = float(q_out[joint_index])
 
         if gripper_needs_update:
             self.publish_single_joint_command(
@@ -520,9 +528,6 @@ class D1IKNode(Node):
             self.publish_single_mode_command_for_servo(servo_id, mode_value)
 
     def publish_startup_arm_command(self) -> None:
-        self._last_commanded_joint4_angle_deg = float(
-            self.STARTUP_ARM_COMMAND["data"]["angle4"]
-        )
         msg = ArmString()
         msg.data = json.dumps(self.STARTUP_ARM_COMMAND, separators=(",", ":"))
         self.pub_arm_command.publish(msg)
@@ -556,29 +561,9 @@ class D1IKNode(Node):
             )
         )
 
-    def publish_arm_ik_debug(self, q_out: np.ndarray) -> None:
-        msg = String()
-        nominal_q_str = np.array2string(self.solver.nominal_q, precision=2, separator=", ")
-        q_out_str = np.array2string(q_out, precision=1, separator=", ")
-        x_ref_str = "nan" if self._up_down_x_reference is None else f"{self._up_down_x_reference:.4f}"
-        y_ref_str = "nan" if self._up_down_y_reference is None else f"{self._up_down_y_reference:.4f}"
-        z_ref_str = "nan" if self._up_down_z_reference is None else f"{self._up_down_z_reference:.4f}"
-        msg.data = (
-            f"mode={self._active_solver_mode}\n"
-            f"q0={nominal_q_str}\n"
-            f"x_ref={x_ref_str}\n"
-            f"y_ref={y_ref_str}\n"
-            f"z_ref={z_ref_str}\n"
-            f"joint4_current={self.latest_joint4_angle_deg}\n"
-            f"joint4_cmd={self._last_commanded_joint4_angle_deg}\n"
-            f"q_out={q_out_str}"
-        )
-        self.pub_arm_ik_debug.publish(msg)
-
-
 def main() -> None:
     rclpy.init()
-    node = D1IKNode()
+    node = ArmControllerNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

@@ -15,7 +15,7 @@ from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 from go2_msgs.msg import ArmAngles, LocomotionCmd, LoopStatus, QDq
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, JointState
-from std_msgs.msg import Int32, String
+from std_msgs.msg import Int32
 from tf2_msgs.msg import TFMessage
 from unitree_go.msg import LowCmd, LowState
 from unitree_arm.msg import ArmString
@@ -29,8 +29,8 @@ _INTENT_ESTIMATORS = {
         "label": "Front/Back Estimator",
         "process_name": "front_back_estimator",
         "executable": "front_back_intent_estimator",
-        "status_key": "intent_estimator_forward_backward",
-        "status_topic": "/status/intent_estimator/forward_backward",
+        "status_key": "intent_estimator_front_back",
+        "status_topic": "/status/intent_estimator/front_back",
     },
     "left_right": {
         "label": "Left/Right Estimator",
@@ -96,8 +96,7 @@ class TelemetryNode(Node):
             "arm_angles": "/arm_angles",
             "arm_feedback": "/arm_Feedback",
             "arm_command": "/arm_Command",
-            "arm_ik_debug": "/arm_ik_debug",
-            "intent_forward_backward": "/direction_intent/forward_backward",
+            "intent_forward_backward": "/direction_intent/front_back",
             "intent_left_right": "/direction_intent/left_right",
             "intent_up_down": "/direction_intent/up_down",
         }
@@ -124,9 +123,6 @@ class TelemetryNode(Node):
         )
         self.create_subscription(
             ArmString, self._topic_names["arm_command"], self.on_arm_command, qos
-        )
-        self.create_subscription(
-            String, self._topic_names["arm_ik_debug"], self.on_arm_ik_debug, qos
         )
         self.create_subscription(
             Int32,
@@ -173,8 +169,8 @@ class TelemetryNode(Node):
         )
         self.create_subscription(
             LoopStatus,
-            "/status/intent_estimator/forward_backward",
-            lambda m: self.on_loop_status("intent_estimator_forward_backward", m),
+            "/status/intent_estimator/front_back",
+            lambda m: self.on_loop_status("intent_estimator_front_back", m),
             status_qos,
         )
         self.create_subscription(
@@ -244,13 +240,6 @@ class TelemetryNode(Node):
 
     def on_arm_command(self, msg: ArmString) -> None:
         self._mark_topic("arm_command")
-
-    def on_arm_ik_debug(self, msg: String) -> None:
-        with self._lock:
-            t = time.monotonic()
-            self._status["arm_ik_debug"] = (True, t)
-            self._update_topic_rate("arm_ik_debug", t)
-            self._topic_latest_msg["arm_ik_debug"] = msg.data
 
     def _mark_topic(self, key: str) -> None:
         with self._lock:
@@ -871,7 +860,7 @@ def _render_sidebar(node: TelemetryNode) -> None:
     ]
     state_converter_active = (
         launch_process_manager.is_running("state_converter_stack")
-        or launch_process_manager.is_running("arm_controller")
+        or launch_process_manager.is_running("arm_feedback_parser")
     )
     arm_controller_active = launch_process_manager.is_arm_controller_running()
     active_arm_controller_mode = launch_process_manager.get_active_arm_controller_mode()
@@ -1183,7 +1172,6 @@ def _render_dashboard(node: TelemetryNode) -> None:
                 ("arm_feedback", "arm_feedback"),
                 ("arm_angles", "arm_angles"),
                 ("arm_command", "arm_command"),
-                ("arm_ik_debug", "arm_ik_debug"),
             ],
         ),
         (
@@ -1296,7 +1284,7 @@ def _render_dashboard(node: TelemetryNode) -> None:
             "</div>"
         )
     st.markdown("".join(group_blocks), unsafe_allow_html=True)
-    fb_topic_name = topic_names.get("intent_forward_backward", "/direction_intent/forward_backward")
+    fb_topic_name = topic_names.get("intent_forward_backward", "/direction_intent/front_back")
     lr_topic_name = topic_names.get("intent_left_right", "/direction_intent/left_right")
     st.markdown(
         "<div class=\"intent-panels\">"
@@ -1332,10 +1320,6 @@ def _render_dashboard(node: TelemetryNode) -> None:
         + "</div>",
         unsafe_allow_html=True,
     )
-    arm_ik_debug_msg = topic_latest_msg.get("arm_ik_debug")
-    if arm_ik_debug_msg:
-        st.caption("Arm IK Debug")
-        st.code(arm_ik_debug_msg, language="text")
     st.subheader("Nodes")
     node_names = snapshot.get("node_names", [])
     if node_names:

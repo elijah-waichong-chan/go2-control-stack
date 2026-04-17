@@ -7,7 +7,6 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
-from std_msgs.msg import String
 
 from go2_msgs.msg import ArmAngles
 from unitree_arm.msg import ArmString
@@ -113,11 +112,6 @@ class D1ZReferenceNode(Node):
         self.pub_arm_command = self.create_publisher(
             ArmString,
             arm_command_topic,
-            pub_qos,
-        )
-        self.pub_arm_ik_debug = self.create_publisher(
-            String,
-            "/arm_ik_debug",
             pub_qos,
         )
         self.sub_arm_angles = self.create_subscription(
@@ -237,7 +231,6 @@ class D1ZReferenceNode(Node):
                     f"solved={solved_z:.4f} m, "
                     f"error={z_error:.4f} m"
                 )
-            self.publish_arm_ik_debug(q_out)
         except RuntimeError as exc:
             self.get_logger().warning(f"IK solve failed: {exc}")
 
@@ -409,15 +402,6 @@ class D1ZReferenceNode(Node):
                 for servo_id, mode_value in self.COMMAND_MODE_BY_SERVO_ID.items()
             )
         )
-
-    def publish_arm_ik_debug(self, q_out: np.ndarray) -> None:
-        msg = String()
-        nominal_q_str = np.array2string(self.solver.nominal_q, precision=2, separator=", ")
-        q_out_str = np.array2string(q_out, precision=1, separator=", ")
-        z_ref_str = "nan" if self.z_reference is None else f"{self.z_reference:.4f}"
-        msg.data = f"q0={nominal_q_str}\nz_ref={z_ref_str}\nq_out={q_out_str}"
-        self.pub_arm_ik_debug.publish(msg)
-
 
 def main() -> None:
     rclpy.init()
