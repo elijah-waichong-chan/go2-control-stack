@@ -49,9 +49,9 @@ Start and run the container:
 ```bash
 sudo docker run -d \
   --net=host \
-  --mount type=bind,src="$(pwd)",dst=/home/go2-control-stack \
-  --name go2-ros2-control \
-  go2-ros2-control sleep infinity
+  --mount type=bind,src="$(pwd)",dst=/home/hq-pcot \
+  --name hq-pcot \
+  hq-pcot sleep infinity
 ```
 
 Open a shell in the container:
