@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 import time
 
@@ -12,6 +13,16 @@ from ament_index_python.packages import get_package_share_directory
 
 JointVector = np.ndarray
 q0 = np.array([-90.0, 80.0, 10.0, 0.0, -90.0, 90.0], dtype=float)
+
+
+@dataclass(frozen=True)
+class _ModeSettings:
+    locked_joint_indices: tuple[int, ...]
+    tool_axis_cost: float
+    x_cost: float
+    y_cost: float
+    z_cost: float
+    posture_cost: float
 
 
 class D1IKSolver:
@@ -53,6 +64,23 @@ class D1IKSolver:
     )
     JOINT_AXIS_Z_SIGN = (1.0, -1.0, -1.0, 1.0, -1.0, -1.0)
 
+    FRONT_BACK_SETTINGS = _ModeSettings(
+        locked_joint_indices=(0,),
+        tool_axis_cost=50.0,
+        x_cost=0.0,
+        y_cost=1.0,
+        z_cost=5.0,
+        posture_cost=5e-4,
+    )
+    UP_DOWN_SETTINGS = _ModeSettings(
+        locked_joint_indices=(0, 3),
+        tool_axis_cost=3.0,
+        x_cost=1.0,
+        y_cost=1.0,
+        z_cost=10.0,
+        posture_cost=0.0,
+    )
+
     def __init__(self) -> None:
         package_share = Path(get_package_share_directory(self.DESCRIPTION_PACKAGE))
         self.urdf_path = package_share / self.URDF_RELATIVE_PATH
@@ -75,33 +103,59 @@ class D1IKSolver:
             self.model.joints[joint_id].idx_q for joint_id in self.controlled_joint_ids
         )
 
-        self.lower_limits = np.rad2deg(np.array(
-            [self.model.lowerPositionLimit[idx_q] for idx_q in self.controlled_joint_idx_q],
-            dtype=float,
-        ))
-        self.upper_limits = np.rad2deg(np.array(
-            [self.model.upperPositionLimit[idx_q] for idx_q in self.controlled_joint_idx_q],
-            dtype=float,
-        ))
-        self.nominal_q = q0.copy()
-        self.set_nominal_q(self.nominal_q)
+        self.lower_limits = np.rad2deg(
+            np.array(
+                [
+                    self.model.lowerPositionLimit[idx_q]
+                    for idx_q in self.controlled_joint_idx_q
+                ],
+                dtype=float,
+            )
+        )
+        self.upper_limits = np.rad2deg(
+            np.array(
+                [
+                    self.model.upperPositionLimit[idx_q]
+                    for idx_q in self.controlled_joint_idx_q
+                ],
+                dtype=float,
+            )
+        )
         self.last_solve_time_ms = 0.0
+        self.q0_deg = q0.copy()
+        self.set_q0(self.q0_deg)
 
-    def set_nominal_q(self, q: JointVector) -> None:
-        q = np.asarray(q, dtype=float)
-        self.nominal_q = q.copy()
-        self.nominal_end_effector_x = self.get_end_effector_x(self.nominal_q)
-        self.nominal_end_effector_y = self.get_end_effector_y(self.nominal_q)
-        self.nominal_end_effector_z = self.get_end_effector_z(self.nominal_q)
-        self.nominal_end_effector_rotation = self.get_end_effector_rotation(self.nominal_q)
-        self.nominal_joint6_minus_joint5 = (
-            self.get_joint_position("Joint6", self.nominal_q)
-            - self.get_joint_position("Joint5", self.nominal_q)
+    def set_q0(self, q: JointVector) -> None:
+        q = np.asarray(q, dtype=float).reshape(-1)
+        self.q0_deg = q.copy()
+        self.q0_end_effector_x = self.get_end_effector_x(self.q0_deg)
+        self.q0_end_effector_y = self.get_end_effector_y(self.q0_deg)
+        self.q0_end_effector_z = self.get_end_effector_z(self.q0_deg)
+        self.q0_end_effector_rotation = self.get_end_effector_rotation(self.q0_deg)
+        self.q0_joint6_minus_joint5 = (
+            self.get_joint_position("Joint6", self.q0_deg)
+            - self.get_joint_position("Joint5", self.q0_deg)
         )
 
+        # Backward-compatible aliases for older IPOPT callers.
+        self.nominal_q = self.q0_deg.copy()
+        self.nominal_end_effector_x = self.q0_end_effector_x
+        self.nominal_end_effector_y = self.q0_end_effector_y
+        self.nominal_end_effector_z = self.q0_end_effector_z
+        self.nominal_end_effector_rotation = self.q0_end_effector_rotation.copy()
+        self.nominal_joint6_minus_joint5 = self.q0_joint6_minus_joint5.copy()
+
+    def save_current_configuration_as_q0(self, q: JointVector) -> None:
+        """Replace the stored q0 configuration with the provided arm state."""
+        self.set_q0(q)
+
+    # Backward-compatible alias for existing IPOPT callers.
+    def set_nominal_q(self, q: JointVector) -> None:
+        self.set_q0(q)
+
+    # Backward-compatible alias for existing IPOPT callers.
     def save_current_configuration_as_nominal(self, q: JointVector) -> None:
-        """Replace the stored nominal configuration with the provided arm state."""
-        self.set_nominal_q(q)
+        self.save_current_configuration_as_q0(q)
 
     def get_model_q(self, q: JointVector) -> JointVector:
         q = np.asarray(q, dtype=float)
@@ -219,33 +273,82 @@ class D1IKSolver:
     def _casadi_rpy_matrix(self, roll: float, pitch: float, yaw: float) -> ca.MX:
         return self._casadi_rot_z(yaw) @ self._casadi_rot_y(pitch) @ self._casadi_rot_x(roll)
 
-    def solve_with_fixed_joint1(self, q: JointVector) -> JointVector:
-        """Solve for a configuration with Joint1 fixed."""
-        q = np.asarray(q, dtype=float)
+    def solve_front_back(
+        self,
+        current_q_deg: JointVector,
+        q0_deg: JointVector,
+    ) -> JointVector:
+        return self._solve_mode(
+            current_q_deg,
+            q0_deg,
+            self.FRONT_BACK_SETTINGS,
+            x_reference=None,
+            y_reference=float(self.get_end_effector_y(q0_deg)),
+            z_reference=float(self.get_end_effector_z(q0_deg)),
+        )
+
+    def solve_up_down(
+        self,
+        current_q_deg: JointVector,
+        z_reference: float,
+        q0_deg: JointVector,
+        *,
+        x_reference: float | None = None,
+        y_reference: float | None = None,
+    ) -> JointVector:
+        q0_deg = np.asarray(q0_deg, dtype=float).reshape(-1)
+        return self._solve_mode(
+            current_q_deg,
+            q0_deg,
+            self.UP_DOWN_SETTINGS,
+            x_reference=float(self.get_end_effector_x(q0_deg)) if x_reference is None else x_reference,
+            y_reference=float(self.get_end_effector_y(q0_deg)) if y_reference is None else y_reference,
+            z_reference=float(z_reference),
+        )
+
+    def _solve_mode(
+        self,
+        current_q_deg: JointVector,
+        q0_deg: JointVector,
+        settings: _ModeSettings,
+        *,
+        x_reference: float | None,
+        y_reference: float | None,
+        z_reference: float | None,
+    ) -> JointVector:
+        current_q_deg = np.asarray(current_q_deg, dtype=float).reshape(-1)
+        q0_deg = np.asarray(q0_deg, dtype=float).reshape(-1)
 
         opti = ca.Opti()
         q_var = opti.variable(len(self.joint_names))
-        q_target = ca.DM(q)
-        nominal_rotation = ca.DM(self.nominal_end_effector_rotation)
-        # Constrain the tool-axis direction.
-        tool_axis_error = (
-            self.get_casadi_end_effector_rotation(q_var)[:, 2] - nominal_rotation[:, 2]
-        )
-        y_error = self.get_casadi_end_effector_y(q_var) - self.nominal_end_effector_y
-        z_error = self.get_casadi_end_effector_z(q_var) - self.nominal_end_effector_z
-        q_input_error = q_var - q_target
-        opti.minimize(
-            50 * ca.sumsqr(tool_axis_error)
-            + 5 * ca.sumsqr(z_error)
-            + ca.sumsqr(y_error)
-            + 0.0005 * ca.sumsqr(q_input_error)
-        )
+        q_target = ca.DM(current_q_deg)
+        q0_target = ca.DM(q0_deg)
+        q0_rotation = ca.DM(self.get_end_effector_rotation(q0_deg))
 
-        # Joint Angles
+        tool_axis_error = self.get_casadi_end_effector_rotation(q_var)[:, 2] - q0_rotation[:, 2]
+
+        objective = 0
+        if settings.tool_axis_cost > 0.0:
+            objective += settings.tool_axis_cost * ca.sumsqr(tool_axis_error)
+        if x_reference is not None and settings.x_cost > 0.0:
+            x_error = self.get_casadi_end_effector_x(q_var) - float(x_reference)
+            objective += settings.x_cost * ca.sumsqr(x_error)
+        if y_reference is not None and settings.y_cost > 0.0:
+            y_error = self.get_casadi_end_effector_y(q_var) - float(y_reference)
+            objective += settings.y_cost * ca.sumsqr(y_error)
+        if z_reference is not None and settings.z_cost > 0.0:
+            z_error = self.get_casadi_end_effector_z(q_var) - float(z_reference)
+            objective += settings.z_cost * ca.sumsqr(z_error)
+        if settings.posture_cost > 0.0:
+            q_input_error = q_var - q_target
+            objective += settings.posture_cost * ca.sumsqr(q_input_error)
+
+        opti.minimize(objective)
+
         opti.subject_to(opti.bounded(self.lower_limits, q_var, self.upper_limits))
-        # No change to base angle
-        opti.subject_to(q_var[0] == q[0])
-        opti.set_initial(q_var, np.clip(q, self.lower_limits, self.upper_limits))
+        for joint_index in settings.locked_joint_indices:
+            opti.subject_to(q_var[joint_index] == q0_target[joint_index])
+        opti.set_initial(q_var, np.clip(current_q_deg, self.lower_limits, self.upper_limits))
         opti.solver(
             "ipopt",
             {"expand": True, "print_time": False},
@@ -257,22 +360,11 @@ class D1IKSolver:
         self.last_solve_time_ms = (time.perf_counter() - start_time) * 1000.0
         return np.asarray(solution.value(q_var), dtype=float).reshape(-1)
 
-    def solve_up_down(
-        self,
-        q: JointVector,
-        z_reference: float,
-        *,
-        x_reference: float | None = None,
-        y_reference: float | None = None,
-    ) -> JointVector:
-        """Track frozen x/y references while holding a z reference."""
-        return self.solve_with_z_reference(
-            q,
-            z_reference,
-            x_reference=x_reference,
-            y_reference=y_reference,
-        )
+    # Backward-compatible wrapper for existing IPOPT callers.
+    def solve_with_fixed_joint1(self, q: JointVector) -> JointVector:
+        return self.solve_front_back(q, self.q0_deg)
 
+    # Backward-compatible wrapper for existing IPOPT callers.
     def solve_with_z_reference(
         self,
         q: JointVector,
@@ -281,44 +373,13 @@ class D1IKSolver:
         x_reference: float | None = None,
         y_reference: float | None = None,
     ) -> JointVector:
-        """Track nominal pose/orientation while allowing z motion."""
-        q = np.asarray(q, dtype=float)
-
-        opti = ca.Opti()
-        q_var = opti.variable(len(self.joint_names))
-        q_target = ca.DM(q)
-        x_target = self.nominal_end_effector_x if x_reference is None else float(x_reference)
-        y_target = self.nominal_end_effector_y if y_reference is None else float(y_reference)
-        nominal_rotation = ca.DM(self.nominal_end_effector_rotation)
-        tool_axis_error = (
-            self.get_casadi_end_effector_rotation(q_var)[:, 2] - nominal_rotation[:, 2]
+        return self.solve_up_down(
+            q,
+            z_reference,
+            self.q0_deg,
+            x_reference=x_reference,
+            y_reference=y_reference,
         )
-        x_error = self.get_casadi_end_effector_x(q_var) - x_target
-        y_error = self.get_casadi_end_effector_y(q_var) - y_target
-        z_error = self.get_casadi_end_effector_z(q_var) - float(z_reference)
-        q_input_error = q_var - q_target
-        opti.minimize(
-            3 * ca.sumsqr(tool_axis_error)
-            + 10 * ca.sumsqr(z_error)
-            + 1 * ca.sumsqr(x_error)
-            + 1 * ca.sumsqr(y_error)
-            # + 0.0005 * ca.sumsqr(q_input_error)
-        )
-
-        opti.subject_to(opti.bounded(self.lower_limits, q_var, self.upper_limits))
-        opti.subject_to(q_var[0] == q[0])
-        opti.subject_to(q_var[3] == q[3])
-        opti.set_initial(q_var, np.clip(q, self.lower_limits, self.upper_limits))
-        opti.solver(
-            "ipopt",
-            {"expand": True, "print_time": False},
-            {"print_level": 0, "sb": "yes"},
-        )
-
-        start_time = time.perf_counter()
-        solution = opti.solve()
-        self.last_solve_time_ms = (time.perf_counter() - start_time) * 1000.0
-        return np.asarray(solution.value(q_var), dtype=float).reshape(-1)
 
 
 if __name__ == "__main__":
@@ -329,11 +390,11 @@ if __name__ == "__main__":
     print("=" * 48)
     print("Input")
     print(f"  q_test_deg: {np.array2string(q_test, precision=1)}")
-    print(f"  nominal_y:  {solver.nominal_end_effector_y:.3f}")
-    print(f"  nominal_z:  {solver.nominal_end_effector_z:.3f}")
+    print(f"  q0_y:       {solver.q0_end_effector_y:.3f}")
+    print(f"  q0_z:       {solver.q0_end_effector_z:.3f}")
     print("-" * 48)
 
-    q_solution = solver.solve_with_fixed_joint1(q_test)
+    q_solution = solver.solve_front_back(q_test, solver.q0_deg)
     solution_y = solver.get_end_effector_y(q_solution)
     solution_z = solver.get_end_effector_z(q_solution)
 
@@ -344,13 +405,13 @@ if __name__ == "__main__":
     print("Result")
     print(f"  q_solution_deg: {np.array2string(q_solution, precision=1)}")
     print(
-        f"  y: nominal={solver.nominal_end_effector_y:.3f} "
+        f"  y: q0={solver.q0_end_effector_y:.3f} "
         f"solution={solution_y:.3f} "
-        f"delta={solution_y - solver.nominal_end_effector_y:.3f}"
+        f"delta={solution_y - solver.q0_end_effector_y:.3f}"
     )
     print(
-        f"  z: nominal={solver.nominal_end_effector_z:.3f} "
+        f"  z: q0={solver.q0_end_effector_z:.3f} "
         f"solution={solution_z:.3f} "
-        f"delta={solution_z - solver.nominal_end_effector_z:.3f}"
+        f"delta={solution_z - solver.q0_end_effector_z:.3f}"
     )
     print("=" * 48)

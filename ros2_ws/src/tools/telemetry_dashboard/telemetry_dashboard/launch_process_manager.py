@@ -15,9 +15,7 @@ _PROCESSES: Dict[str, subprocess.Popen] = {}
 _ARM_FEEDBACK_PARSER_PROCESS = "arm_feedback_parser"
 _ARM_CONTROLLER_MODES = {
     "current_ik_ipopt": ("arm_controller", "arm_controller"),
-    "current_ik_drake": ("drake_arm_controller", "drake_arm_controller"),
-    "manual_control_ik_ipopt": ("d1_z_reference_node", "d1_z_reference_node"),
-    "manual_control_ik_drake": ("d1_drake_z_ref_node", "d1_drake_z_ref_node"),
+    "manual_control_ik_ipopt": ("d1_z_ref_node", "d1_z_ref_node"),
 }
 _ARM_CONTROLLER_MODE_ALIASES = {
     "current_ik": "current_ik_ipopt",
@@ -400,6 +398,7 @@ def stop_all() -> None:
         "state_converter_stack",
         _ARM_FEEDBACK_PARSER_PROCESS,
         "arm_controller",
+        "d1_z_ref_node",
         "drake_arm_controller",
         "d1_z_reference_node",
         "d1_drake_z_ref_node",

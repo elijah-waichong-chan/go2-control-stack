@@ -876,11 +876,11 @@ def _render_sidebar(node: TelemetryNode) -> None:
         arm_controller_mode = "current_ik_ipopt"
     elif arm_controller_mode == "manual_control_ik":
         arm_controller_mode = "manual_control_ik_ipopt"
+    elif arm_controller_mode not in {"current_ik_ipopt", "manual_control_ik_ipopt"}:
+        arm_controller_mode = "current_ik_ipopt"
     arm_controller_mode_labels = {
         "current_ik_ipopt": "Current IK (IPOPT)",
-        "current_ik_drake": "Current IK (Drake)",
         "manual_control_ik_ipopt": "Manual z-ref IK (IPOPT)",
-        "manual_control_ik_drake": "Manual z-ref IK (Drake)",
     }
     enable_front_back_estimator = st.session_state.get(
         "ctrl_enable_front_back_estimator", True

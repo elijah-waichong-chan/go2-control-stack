@@ -338,7 +338,7 @@ class ArmControllerNode(Node):
 
         self._active_solver_mode = next_solver_mode
         if next_solver_mode == self.FRONT_BACK_MODE:
-            return self.solver.solve_with_fixed_joint1(q_in)
+            return self.solver.solve_front_back(q_in, self.solver.q0_deg)
         if next_solver_mode == self.UP_DOWN_MODE:
             if (
                 self._up_down_x_reference is None
@@ -350,6 +350,7 @@ class ArmControllerNode(Node):
             return self.solver.solve_up_down(
                 q_in,
                 self._up_down_z_reference,
+                self.solver.q0_deg,
                 x_reference=self._up_down_x_reference,
                 y_reference=self._up_down_y_reference,
             )

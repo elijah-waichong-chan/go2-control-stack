@@ -22,7 +22,7 @@ setup(
         'console_scripts': [
             'arm_feedback_parser = arm_controller.arm_feedback_parser:main',
             'arm_controller = arm_controller.arm_controller:main',
-            'd1_z_reference_node = arm_controller.d1_z_reference_node:main',
+            'd1_z_ref_node = arm_controller.d1_z_ref_node:main',
             'd1_drake_z_ref_node = arm_controller.d1_drake_z_ref_node:main',
             'd1_pink_arm_controller = arm_controller.d1_pink_arm_controller:main',
             'drake_arm_controller = arm_controller.drake_arm_controller:main',

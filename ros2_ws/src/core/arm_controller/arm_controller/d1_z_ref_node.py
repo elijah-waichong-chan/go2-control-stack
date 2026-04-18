@@ -52,25 +52,15 @@ class D1ZReferenceNode(Node):
     JOINT0_MODE_DELAY_S = 1.0
 
     def __init__(self) -> None:
-        super().__init__("d1_z_reference_node")
+        super().__init__("d1_z_ref_node")
 
-        self.declare_parameter("arm_state_topic", "/arm/state")
-        self.declare_parameter("arm_command_topic", "/arm_Command")
-        self.declare_parameter("wireless_topic", "/wirelesscontroller")
-        self.declare_parameter("z_step_m", 0.05)
-        self.declare_parameter("z_velocity_mps", 0.20)
-        self.declare_parameter("z_ref_min_m", -0.09)
-        self.declare_parameter("z_ref_max_m", 0.56)
-        self.declare_parameter("ry_deadzone", 0.10)
-
-        arm_state_topic = str(self.get_parameter("arm_state_topic").value)
-        arm_command_topic = str(self.get_parameter("arm_command_topic").value)
-        wireless_topic = str(self.get_parameter("wireless_topic").value)
-        self.z_step_m = float(self.get_parameter("z_step_m").value)
-        self.z_velocity_mps = abs(float(self.get_parameter("z_velocity_mps").value))
-        self.z_ref_min_m = float(self.get_parameter("z_ref_min_m").value)
-        self.z_ref_max_m = float(self.get_parameter("z_ref_max_m").value)
-        self.ry_deadzone = min(1.0, max(0.0, float(self.get_parameter("ry_deadzone").value)))
+        arm_state_topic = "/arm/state"
+        arm_command_topic = "/arm_Command"
+        wireless_topic = "/wirelesscontroller"
+        self.z_velocity_mps = 0.20
+        self.z_ref_min_m = -0.09
+        self.z_ref_max_m = 0.56
+        self.ry_deadzone = 0.10
         if self.z_ref_min_m > self.z_ref_max_m:
             self.z_ref_min_m, self.z_ref_max_m = self.z_ref_max_m, self.z_ref_min_m
 
@@ -94,13 +84,14 @@ class D1ZReferenceNode(Node):
         )
 
         self.solver = D1IKSolver()
+        self.q0_deg: np.ndarray | None = None
         self.q_out: np.ndarray | None = None
         self.latest_q_in: np.ndarray | None = None
         self.z_reference: float | None = None
         self._pending_q_out_solver: np.ndarray | None = None
         self._pending_q_out: np.ndarray | None = None
-        self._nominal_seeded = False
-        self._nominal_seed_ready_at = time.monotonic() + self.STARTUP_DAMPING_DELAY_S
+        self._q0_seeded = False
+        self._q0_ready_at = time.monotonic() + self.STARTUP_DAMPING_DELAY_S
         self._last_command_time_by_joint: dict[int, float] = {}
         self._pending_single_mode_timers: list = []
         self._latest_right_stick_y = 0.0
@@ -140,7 +131,7 @@ class D1ZReferenceNode(Node):
         )
 
         self.get_logger().info(
-            "d1_z_reference_node running: "
+            "d1_z_ref_node running: "
             f"{arm_state_topic} + {wireless_topic} -> {arm_command_topic}; "
             f"ry controls z_ref in [{self.z_ref_min_m:.2f}, {self.z_ref_max_m:.2f}] m "
             f"at {self.z_velocity_mps:.2f} m/s"
@@ -156,10 +147,10 @@ class D1ZReferenceNode(Node):
         q_in[3] = -q_in[3]
         self.latest_q_in = q_in.copy()
 
-        if not self._nominal_seeded:
-            if time.monotonic() < self._nominal_seed_ready_at:
+        if not self._q0_seeded:
+            if time.monotonic() < self._q0_ready_at:
                 return
-            if not self.save_current_configuration_as_nominal():
+            if not self.save_current_configuration_as_q0():
                 return
 
     def on_wireless(self, msg: WirelessController) -> None:
@@ -206,14 +197,14 @@ class D1ZReferenceNode(Node):
             self._pending_q_out = None
 
     def solve_and_publish_for_current_reference(self) -> None:
-        if self.latest_q_in is None or self.z_reference is None:
+        if self.latest_q_in is None or self.z_reference is None or self.q0_deg is None:
             return
 
         q_in = self.latest_q_in.copy()
         self._pending_q_out_solver = None
         self._pending_q_out = None
         try:
-            q_out_solver = self.solver.solve_with_z_reference(q_in, self.z_reference)
+            q_out_solver = self.solver.solve_up_down(q_in, self.z_reference, self.q0_deg)
             solved_z = self.solver.get_end_effector_z(q_out_solver)
             z_error = solved_z - self.z_reference
             q_out = q_out_solver.copy()
@@ -234,21 +225,22 @@ class D1ZReferenceNode(Node):
         except RuntimeError as exc:
             self.get_logger().warning(f"IK solve failed: {exc}")
 
-    def save_current_configuration_as_nominal(self) -> bool:
-        """Use the latest measured arm configuration as the nominal pose."""
+    def save_current_configuration_as_q0(self) -> bool:
+        """Use the latest measured arm configuration as q0."""
         if self.latest_q_in is None:
             self.get_logger().warning(
-                "Cannot save nominal arm configuration before receiving /arm/state"
+                "Cannot save q0 arm configuration before receiving /arm/state"
             )
             return False
 
-        self.solver.save_current_configuration_as_nominal(self.latest_q_in)
-        nominal_z_reference = float(self.solver.nominal_end_effector_z)
-        self.z_reference = self.clamp_z_reference(nominal_z_reference)
-        self._nominal_seeded = True
+        self.q0_deg = self.latest_q_in.copy()
+        self.solver.save_current_configuration_as_q0(self.q0_deg)
+        q0_z_reference = float(self.solver.q0_end_effector_z)
+        self.z_reference = self.clamp_z_reference(q0_z_reference)
+        self._q0_seeded = True
         self.get_logger().info(
-            "Saved current arm configuration as nominal: "
-            + np.array2string(self.latest_q_in, precision=2, separator=", ")
+            "Saved current arm configuration as q0: "
+            + np.array2string(self.q0_deg, precision=2, separator=", ")
             + f"; z_ref={self.z_reference:.4f}"
         )
         return True

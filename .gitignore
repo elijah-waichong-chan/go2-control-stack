@@ -43,6 +43,7 @@ coverage.xml
 
 # IDE / OS
 .vscode/
+.codex
 .idea/
 *.swp
 *.swo
