@@ -28,24 +28,7 @@ class _ModeSettings:
 class D1IKSolver:
     """Pinocchio/CasADi IK scaffold for the 6-DOF D1 arm."""
 
-    DESCRIPTION_PACKAGE = "d1_description"
-    URDF_RELATIVE_PATH = Path("urdf/d1_description.urdf")
-
-    BASE_FRAME = "base_link"
-    END_EFFECTOR_FRAME = "Link6"
-
-    JOINT_NAMES = (
-        "Joint1",
-        "Joint2",
-        "Joint3",
-        "Joint4",
-        "Joint5",
-        "Joint6",
-    )
     FREE_ORIENTATION_JOINT_INDEX = 5
-
-    BASE_JOINT_NAME = JOINT_NAMES[0]
-    JOINT_NAME_TO_INDEX = {name: index for index, name in enumerate(JOINT_NAMES)}
     JOINT_ORIGINS_XYZ = (
         (0.0, 0.0, 0.0533),
         (0.0, 0.028, 0.0563),
@@ -82,18 +65,27 @@ class D1IKSolver:
     )
 
     def __init__(self) -> None:
-        package_share = Path(get_package_share_directory(self.DESCRIPTION_PACKAGE))
-        self.urdf_path = package_share / self.URDF_RELATIVE_PATH
+        package_share = Path(get_package_share_directory("d1_description"))
+        self.urdf_path = package_share / Path("urdf/d1_description.urdf")
 
         self.model = pin.buildModelFromUrdf(str(self.urdf_path))
         self.data = self.model.createData()
         self.neutral_q = pin.neutral(self.model)
 
-        self.base_frame = self.BASE_FRAME
-        self.end_effector_frame = self.END_EFFECTOR_FRAME
-        self.joint_names = self.JOINT_NAMES
-        self.base_joint_name = self.BASE_JOINT_NAME
-        self.joint_name_to_index = self.JOINT_NAME_TO_INDEX
+        self.base_frame = "base_link"
+        self.end_effector_frame = "Link6"
+        self.joint_names = (
+            "Joint1",
+            "Joint2",
+            "Joint3",
+            "Joint4",
+            "Joint5",
+            "Joint6",
+        )
+        self.base_joint_name = "Joint1"
+        self.joint_name_to_index = {
+            name: index for index, name in enumerate(self.joint_names)
+        }
 
         self.end_effector_frame_id = self.model.getFrameId(self.end_effector_frame)
         self.controlled_joint_ids = tuple(
