@@ -121,7 +121,7 @@ public:
     env_(ORT_LOGGING_LEVEL_WARNING, "locomotion_controller_cpp")
   {
     const auto share_dir = ament_index_cpp::get_package_share_directory("locomotion_controller_cpp");
-    policy_dir_ = share_dir + "/config/policy_dir";
+    model_dir_ = share_dir + "/config/models";
     lowstate_topic_ = "/lowstate";
     locomotion_cmd_topic_ = "/locomotion_cmd";
     lowcmd_topic_ = "/lowcmd";
@@ -136,7 +136,7 @@ public:
     loop_stats_window_ = std::max(100, static_cast<int>(control_hz_ * 10.0));
 
     LoadDeployConfig();
-    CreateOnnxSession(policy_dir_ + "/exported/policy.onnx");
+    CreateOnnxSession(model_dir_ + "/policy.onnx");
 
     last_raw_action_.assign(action_dim_, 0.0F);
 
@@ -174,7 +174,7 @@ private:
 
   void LoadDeployConfig()
   {
-    const std::string deploy_path = policy_dir_ + "/params/deploy.yaml";
+    const std::string deploy_path = model_dir_ + "/deploy.yaml";
     YAML::Node deploy_cfg = YAML::LoadFile(deploy_path);
     if (!deploy_cfg.IsMap())
     {
@@ -751,7 +751,7 @@ private:
   std::unordered_map<std::string, std::vector<float>> recurrent_inputs_;
   std::unordered_map<std::string, std::vector<int64_t>> recurrent_shapes_;
 
-  std::string policy_dir_;
+  std::string model_dir_;
   std::string lowstate_topic_;
   std::string locomotion_cmd_topic_;
   std::string lowcmd_topic_;
