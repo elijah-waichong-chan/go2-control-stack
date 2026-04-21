@@ -17,23 +17,21 @@ from arm_controller.d1_ik_solver import D1IKSolver
 
 
 class ArmControllerNode(Node):
-    COMMAND_THRESHOLD_DEG = 0.1
-    IPOPT_UPDATE_THRESHOLD = 1.0
-    SINGLE_JOINT_INDICES = (1, 2, 3, 4, 5)
-    FIXED_GRIPPER_SERVO_ID = 6
     GRIPPER_CLOSED_ANGLE_DEG = -15.0
     GRIPPER_OPEN_ANGLE_DEG = 50.0
-    FIXED_JOINT1_JOINT5_RANGE_DEG = (-85.0, -105.0)
-    UP_DOWN_JOINT5_RANGE_DEG = (-5.0, 5.0)
+
+    COMMAND_THRESHOLD_DEG = 0.1
+    IPOPT_UPDATE_THRESHOLD = 1.0
+
+    SINGLE_JOINT_INDICES = (1, 2, 3, 4, 5)
+    FIXED_GRIPPER_SERVO_ID = 6
+    FRONT_BACK_MODE_RANGE_DEG = (-85.0, -105.0)
+    UP_DOWN_MODE_RANGE_DEG = (-5.0, 5.0)
     UP_DOWN_IK_PUBLISH_JOINT_INDICES = (1, 2, 4)
     JOINT4_CURRENT_TRANSITION_THRESHOLD = 100.0
     JOINT0_TARGET_DEG = 90.0
-    JOINT5_CURRENT_SWITCH_THRESHOLD = 30.0
+    MODE_SWITCH_CURRENT_THRESHOLD = 30.0
     MODE_SETTLE_DELAY_S = 2.0
-    MODE_SWITCH_UP_DOWN_JOINT3_TARGET_DEG = 5.0
-    MODE_SWITCH_UP_DOWN_JOINT5_TARGET_DEG = -90.0
-    MODE_SWITCH_FRONT_BACK_JOINT3_TARGET_DEG = -85.0
-    MODE_SWITCH_FRONT_BACK_JOINT5_TARGET_DEG = -90.0
     STARTUP_ARM_COMMAND = {
         "seq": 4,
         "address": 1,
@@ -49,14 +47,7 @@ class ArmControllerNode(Node):
             "angle6": GRIPPER_CLOSED_ANGLE_DEG,
         },
     }
-    MODE_SWITCH_UP_DOWN_ARM_COMMAND = [
-        None,
-        None,
-        None,
-        MODE_SWITCH_UP_DOWN_JOINT3_TARGET_DEG,
-        None,
-        MODE_SWITCH_UP_DOWN_JOINT5_TARGET_DEG,
-    ]
+    MODE_SWITCH_UP_DOWN_ARM_COMMAND = [None, None, None, 5.0, None, -90]
     MODE_SWITCH_FRONT_BACK_ARM_COMMAND = [90, -10, 10, -85, -3, -90]
     STARTUP_MODE_DELAY_S = 0.1
     JOINT0_MODE_DELAY_S = 1.0
@@ -66,46 +57,14 @@ class ArmControllerNode(Node):
     def __init__(self) -> None:
         super().__init__("arm_controller")
 
-        self.declare_parameter("up_down_z_velocity_mps", 0.02)
-        self.declare_parameter("up_down_z_ref_min_m", -0.10)
-        self.declare_parameter("up_down_z_ref_max_m", 0.50)
-        self.declare_parameter("up_down_intent_topic", "/direction_intent/up_down")
-        self.declare_parameter("up_down_idle_intent_label", 0)
-        self.declare_parameter(
-            "up_down_increase_intent_label", 5
-        )
-        self.declare_parameter(
-            "up_down_decrease_intent_label", 6
-        )
-        self.declare_parameter("up_down_intent_timeout_s", 0.5)
-
-        self.up_down_z_velocity_mps = abs(
-            float(self.get_parameter("up_down_z_velocity_mps").value)
-        )
-        self.up_down_z_ref_min_m = float(
-            self.get_parameter("up_down_z_ref_min_m").value
-        )
-        self.up_down_z_ref_max_m = float(
-            self.get_parameter("up_down_z_ref_max_m").value
-        )
-        self.up_down_intent_topic = str(self.get_parameter("up_down_intent_topic").value)
-        self.up_down_idle_intent_label = int(
-            self.get_parameter("up_down_idle_intent_label").value
-        )
-        self.up_down_increase_intent_label = int(
-            self.get_parameter("up_down_increase_intent_label").value
-        )
-        self.up_down_decrease_intent_label = int(
-            self.get_parameter("up_down_decrease_intent_label").value
-        )
-        self.up_down_intent_timeout_s = max(
-            0.0, float(self.get_parameter("up_down_intent_timeout_s").value)
-        )
-        if self.up_down_z_ref_min_m > self.up_down_z_ref_max_m:
-            self.up_down_z_ref_min_m, self.up_down_z_ref_max_m = (
-                self.up_down_z_ref_max_m,
-                self.up_down_z_ref_min_m,
-            )
+        self.up_down_z_velocity_mps = 0.02
+        self.up_down_z_ref_min_m = -0.10
+        self.up_down_z_ref_max_m = 0.50
+        self.up_down_intent_topic = "/direction_intent/up_down"
+        self.up_down_idle_intent_label = 0
+        self.up_down_increase_intent_label = 5
+        self.up_down_decrease_intent_label = 6
+        self.up_down_intent_timeout_s = 0.5
 
         qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -381,7 +340,7 @@ class ArmControllerNode(Node):
         next_solver_mode = current_mode
         now = time.monotonic()
 
-        if joint5_current > self.JOINT5_CURRENT_SWITCH_THRESHOLD:
+        if joint5_current > self.MODE_SWITCH_CURRENT_THRESHOLD:
             if (
                 not self._joint5_current_switch_latched
                 and now >= self._next_mode_switch_time
@@ -451,9 +410,9 @@ class ArmControllerNode(Node):
 
     def _infer_mode_from_joint5_angle(self, joint5_angle: float) -> str | None:
         """Infer a startup mode from the current joint-5 angle."""
-        if self._angle_in_range(joint5_angle, self.FIXED_JOINT1_JOINT5_RANGE_DEG):
+        if self._angle_in_range(joint5_angle, self.FRONT_BACK_MODE_RANGE_DEG):
             return "front_back_mode"
-        if self._angle_in_range(joint5_angle, self.UP_DOWN_JOINT5_RANGE_DEG):
+        if self._angle_in_range(joint5_angle, self.UP_DOWN_MODE_RANGE_DEG):
             return "up_down_mode"
         return None
 
