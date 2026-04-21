@@ -82,7 +82,8 @@ class UpDownIntentEstimatorNode(Node):
 
     STATUS_RUNNING = 1
     STATUS_WAITING_FOR_TOPICS = 2
-    TRANSITION_CONFIRMATIONS = 2
+    TRANSITION_CONFIRMATIONS = 3
+    ZERO_TRANSITION_CONFIRMATIONS = 1
     SDK_TO_URDF_LEG_INDEX = (3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8)
 
     def __init__(self) -> None:
@@ -94,6 +95,7 @@ class UpDownIntentEstimatorNode(Node):
         self.lowstate_topic = "/lowstate"
         self.arm_state_topic = "/arm/state"
         self.output_topic = "/direction_intent/up_down"
+        self.raw_output_topic = "/direction_intent/up_down/raw"
         self.status_topic = "/status/intent_estimator/up_down"
         self.status_hz = 10.0
         self.publish_hz = 10.0
@@ -176,6 +178,7 @@ class UpDownIntentEstimatorNode(Node):
             self.sub_arm_angles = self.create_subscription(
                 ArmState, self.arm_state_topic, self.on_arm_angles, sensor_qos
             )
+        self.pub_raw_intent = self.create_publisher(Int32, self.raw_output_topic, 10)
         self.pub_intent = self.create_publisher(Int32, self.output_topic, 10)
         self.pub_status = self.create_publisher(LoopStatus, self.status_topic, status_qos)
         self.status_timer = self.create_timer(
@@ -186,7 +189,7 @@ class UpDownIntentEstimatorNode(Node):
         input_topics = " + ".join(self.input_topics) if self.input_topics else "(none)"
         self.get_logger().info(
             "up_down_intent_estimator ready: "
-            f"{input_topics} -> {self.output_topic}, "
+            f"{input_topics} -> {self.raw_output_topic} (raw), {self.output_topic} (filtered), "
             f"status={self.status_topic}, "
             f"model={self.model.metadata.model_path}, "
             f"window={self.sliding_window_ms:.0f}ms@{self.sampling_hz:.0f}Hz, "
@@ -214,7 +217,11 @@ class UpDownIntentEstimatorNode(Node):
             self.pending_label = candidate
             self.pending_count = 1
 
-        if self.pending_count >= self.TRANSITION_CONFIRMATIONS:
+        required_confirmations = self.TRANSITION_CONFIRMATIONS
+        if candidate == 0 and self.filtered_label in (5, 6):
+            required_confirmations = self.ZERO_TRANSITION_CONFIRMATIONS
+
+        if self.pending_count >= required_confirmations:
             self.filtered_label = candidate
             self.pending_label = None
             self.pending_count = 0
@@ -371,6 +378,10 @@ class UpDownIntentEstimatorNode(Node):
 
         if pred_label is None:
             return
+
+        raw_out = Int32()
+        raw_out.data = int(pred_label)
+        self.pub_raw_intent.publish(raw_out)
 
         filtered_label = self._filter_transition(int(pred_label))
         out = Int32()

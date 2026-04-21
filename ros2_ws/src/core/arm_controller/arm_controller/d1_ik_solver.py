@@ -12,17 +12,18 @@ import pinocchio as pin
 from ament_index_python.packages import get_package_share_directory
 
 JointVector = np.ndarray
-q0 = np.array([-90.0, 80.0, 10.0, 0.0, -90.0, 90.0], dtype=float)
 
 
 @dataclass(frozen=True)
 class _ModeSettings:
-    locked_joint_indices: tuple[int, ...]
+    locked_to_current_joint_indices: tuple[int, ...]
+    locked_to_q0_joint_indices: tuple[int, ...]
     tool_axis_cost: float
     x_cost: float
     y_cost: float
     z_cost: float
-    posture_cost: float
+    current_q_regularization_cost: float
+    q0_regularization_cost: float
 
 
 class D1IKSolver:
@@ -48,20 +49,24 @@ class D1IKSolver:
     JOINT_AXIS_Z_SIGN = (1.0, -1.0, -1.0, 1.0, -1.0, -1.0)
 
     FRONT_BACK_SETTINGS = _ModeSettings(
-        locked_joint_indices=(0,),
+        locked_to_current_joint_indices=(0,),
+        locked_to_q0_joint_indices=(),
         tool_axis_cost=50.0,
         x_cost=0.0,
         y_cost=1.0,
         z_cost=5.0,
-        posture_cost=5e-4,
+        current_q_regularization_cost=0.0,
+        q0_regularization_cost=0.001,
     )
     UP_DOWN_SETTINGS = _ModeSettings(
-        locked_joint_indices=(0, 3),
+        locked_to_current_joint_indices=(),
+        locked_to_q0_joint_indices=(0, 3),
         tool_axis_cost=3.0,
         x_cost=1.0,
         y_cost=1.0,
         z_cost=10.0,
-        posture_cost=0.0,
+        current_q_regularization_cost=0.0,
+        q0_regularization_cost=0.0,
     )
 
     def __init__(self) -> None:
@@ -114,8 +119,7 @@ class D1IKSolver:
             )
         )
         self.last_solve_time_ms = 0.0
-        self.q0_deg = q0.copy()
-        self.set_q0(self.q0_deg)
+        self.set_q0(self.get_neutral_q_deg())
 
     def set_q0(self, q: JointVector) -> None:
         q = np.asarray(q, dtype=float).reshape(-1)
@@ -136,6 +140,14 @@ class D1IKSolver:
         self.nominal_end_effector_z = self.q0_end_effector_z
         self.nominal_end_effector_rotation = self.q0_end_effector_rotation.copy()
         self.nominal_joint6_minus_joint5 = self.q0_joint6_minus_joint5.copy()
+
+    def get_neutral_q_deg(self) -> JointVector:
+        return np.rad2deg(
+            np.array(
+                [self.neutral_q[idx_q] for idx_q in self.controlled_joint_idx_q],
+                dtype=float,
+            )
+        )
 
     def save_current_configuration_as_q0(self, q: JointVector) -> None:
         """Replace the stored q0 configuration with the provided arm state."""
@@ -331,14 +343,23 @@ class D1IKSolver:
         if z_reference is not None and settings.z_cost > 0.0:
             z_error = self.get_casadi_end_effector_z(q_var) - float(z_reference)
             objective += settings.z_cost * ca.sumsqr(z_error)
-        if settings.posture_cost > 0.0:
-            q_input_error = q_var - q_target
-            objective += settings.posture_cost * ca.sumsqr(q_input_error)
+        if settings.current_q_regularization_cost > 0.0:
+            current_q_regularization_error = q_var - q_target
+            objective += settings.current_q_regularization_cost * ca.sumsqr(
+                current_q_regularization_error
+            )
+        if settings.q0_regularization_cost > 0.0:
+            q0_regularization_error = q_var - q0_target
+            objective += settings.q0_regularization_cost * ca.sumsqr(
+                q0_regularization_error
+            )
 
         opti.minimize(objective)
 
         opti.subject_to(opti.bounded(self.lower_limits, q_var, self.upper_limits))
-        for joint_index in settings.locked_joint_indices:
+        for joint_index in settings.locked_to_current_joint_indices:
+            opti.subject_to(q_var[joint_index] == q_target[joint_index])
+        for joint_index in settings.locked_to_q0_joint_indices:
             opti.subject_to(q_var[joint_index] == q0_target[joint_index])
         opti.set_initial(q_var, np.clip(current_q_deg, self.lower_limits, self.upper_limits))
         opti.solver(
@@ -376,7 +397,7 @@ class D1IKSolver:
 
 if __name__ == "__main__":
     solver = D1IKSolver()
-    q_test = q0.copy()
+    q_test = solver.q0_deg.copy()
     q_test[0] = -40.0
 
     print("=" * 48)

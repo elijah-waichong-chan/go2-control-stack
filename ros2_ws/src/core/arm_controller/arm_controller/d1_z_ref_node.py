@@ -57,7 +57,7 @@ class D1ZReferenceNode(Node):
         arm_state_topic = "/arm/state"
         arm_command_topic = "/arm_Command"
         wireless_topic = "/wirelesscontroller"
-        self.z_velocity_mps = 0.20
+        self.z_velocity_mps = 0.15
         self.z_ref_min_m = -0.09
         self.z_ref_max_m = 0.56
         self.ry_deadzone = 0.10
