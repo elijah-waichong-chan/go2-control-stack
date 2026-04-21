@@ -88,6 +88,7 @@ class LeftRightIntentEstimatorNode(Node):
         self.model_dir = default_model_dir.expanduser()
         self.lowstate_topic = "/lowstate"
         self.output_topic = "/direction_intent/left_right"
+        self.raw_output_topic = "/direction_intent/left_right/raw"
         self.status_topic = "/status/intent_estimator/left_right"
         self.status_hz = 10.0
         self.publish_hz = 10.0
@@ -147,6 +148,7 @@ class LeftRightIntentEstimatorNode(Node):
         self.sub_lowstate = self.create_subscription(
             LowState, self.lowstate_topic, self.on_lowstate, sensor_qos
         )
+        self.pub_raw_intent = self.create_publisher(Int32, self.raw_output_topic, 10)
         self.pub_intent = self.create_publisher(Int32, self.output_topic, 10)
         self.pub_status = self.create_publisher(LoopStatus, self.status_topic, status_qos)
         self.status_timer = self.create_timer(1.0 / max(1.0, self.status_hz), self.on_status_timer)
@@ -154,7 +156,7 @@ class LeftRightIntentEstimatorNode(Node):
 
         self.get_logger().info(
             "left_right_intent_estimator ready: "
-            f"{self.lowstate_topic} -> {self.output_topic}, "
+            f"{self.lowstate_topic} -> {self.raw_output_topic} (raw), {self.output_topic} (filtered), "
             f"status={self.status_topic}, "
             f"model={self.model.metadata.model_path}, "
             f"window={self.sliding_window_ms:.0f}ms@{self.sampling_hz:.0f}Hz, "
@@ -309,6 +311,10 @@ class LeftRightIntentEstimatorNode(Node):
 
         if pred_label is None:
             return
+
+        raw_out = Int32()
+        raw_out.data = int(pred_label)
+        self.pub_raw_intent.publish(raw_out)
 
         filtered_label = self._filter_transition(int(pred_label))
         out = Int32()
