@@ -18,7 +18,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/QDq.msg"
   "msg/LocomotionCmd.msg"
   "msg/ArmState.msg"
-  "msg/ArmTarget.msg"
+  "msg/ArmTask.msg"
   "msg/PushEvent.msg"
   "msg/LoopStatus.msg"
   DEPENDENCIES builtin_interfaces std_msgs

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+"""Execute motion-coordinator arm tasks through local IK and servo commands."""
+
+from __future__ import annotations
 
 import json
 import time
@@ -6,43 +9,48 @@ import time
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
-
-from hq_pcot_msgs.msg import ArmState
-from std_msgs.msg import Int32
-from unitree_arm.msg import ArmString
-from unitree_go.msg import WirelessController
+from rclpy.qos import (
+    QoSDurabilityPolicy,
+    QoSHistoryPolicy,
+    QoSProfile,
+    QoSReliabilityPolicy,
+)
 
 from arm_controller.d1_ik_solver import D1IKSolver
+from hq_pcot_msgs.msg import ArmState, ArmTask
+from unitree_arm.msg import ArmString
+from unitree_go.msg import WirelessController
 
 
 class ArmControllerNode(Node):
     GRIPPER_CLOSED_ANGLE_DEG = -15.0
     GRIPPER_OPEN_ANGLE_DEG = 50.0
 
-    FRONT_BACK_ARM_POSE = [90, -10, 10, -85, -3, -90]
-    FRONT_BACK_IK_PUBLISH_JOINT_INDICES = (1, 2, 3, 4, 5)
-    FRONT_BACK_MODE_RANGE_DEG = (-85.0, -105.0)
+    DEFAULT_ARM_POSE = [90.0, -10.0, 10.0, -85.0, -3.0, -90.0]
+    FRONT_BACK_TRACK_UPDATE_MASK = (0, 1, 1, 1, 1, 1)
     FRONT_BACK_IK_UPDATE_JOINT0_THRESHOLD = 1.0
     FRONT_BACK_JOINT4_CURRENT_THRESHOLD = 100.0
 
-    UP_DOWN_ARM_POSE = [None, None, None, 5.0, None, -90]
-    UP_DOWN_IK_PUBLISH_JOINT_INDICES = (1, 2, 4)
-    UP_DOWN_IDLE_INTENT_LABEL = 0
-    UP_DOWN_INCREASE_INTENT_LABEL = 5
-    UP_DOWN_DECREASE_INTENT_LABEL = 6
-    UP_DOWN_MODE_RANGE_DEG = (-5.0, 5.0)
+    UP_DOWN_TRACK_UPDATE_MASK = (0, 1, 1, 0, 1, 0)
     UP_DOWN_Z_VELOCITY_MPS = 0.02
     UP_DOWN_Z_REF_MIN_M = -0.10
     UP_DOWN_Z_REF_MAX_M = 0.50
-    UP_DOWN_INTENT_TOPIC = "/direction_intent/up_down"
 
     COMMAND_THRESHOLD_DEG = 0.1
-    MODE_SWITCH_JOINT5_CURRENT_THRESHOLD = 30.0
     MOTION_SETTLE_DELAY_S = 2.0
 
     def __init__(self) -> None:
         super().__init__("arm_controller")
+
+        self.declare_parameter("arm_state_topic", "/arm/state")
+        self.declare_parameter("arm_task_topic", "/arm_task")
+        self.declare_parameter("arm_command_topic", "/arm_Command")
+        self.declare_parameter("wireless_topic", "/wirelesscontroller")
+
+        self.arm_state_topic = str(self.get_parameter("arm_state_topic").value)
+        self.arm_task_topic = str(self.get_parameter("arm_task_topic").value)
+        self.arm_command_topic = str(self.get_parameter("arm_command_topic").value)
+        self.wireless_topic = str(self.get_parameter("wireless_topic").value)
 
         qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -53,32 +61,47 @@ class ArmControllerNode(Node):
 
         self.solver = D1IKSolver()
         self.latest_gripper_angle_deg: float | None = None
-        self._gripper_target_angle_deg = self.GRIPPER_CLOSED_ANGLE_DEG
-        self._active_solver_mode: str | None = None
-        self._nominal_seeded = False
-        self._nominal_seed_ready_at = time.monotonic() + self.MOTION_SETTLE_DELAY_S
-        self._pending_nominal_seed_mode: str | None = None
-        self._last_wireless_keys = 0
-        self._joint0_is_damped = True
-        self._joint5_current_switch_latched = False
-        self._next_mode_switch_time = 0.0
-        self._up_down_z_reference: float | None = None
-        self._up_down_x_reference: float | None = None
-        self._up_down_y_reference: float | None = None
-        self._last_up_down_control_time: float | None = None
-        self._latest_up_down_intent: int | None = None
-        self._last_up_down_intent_time: float | None = None
-        self._last_received_joint0_deg: float | None = None
+        self.latest_target_joint_configuration_deg: np.ndarray | None = None
+        self.latest_target_joint_update_mask: tuple[int, int, int, int, int, int] = (
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        self.latest_arm_angles_deg: np.ndarray | None = None
+        self.gripper_target_angle_deg = self.GRIPPER_CLOSED_ANGLE_DEG
+        self.last_wireless_keys = 0
+        self.joint0_is_damped = True
+
+        self.active_solver_mode: str | None = None
+        self.active_tracking_task: int = ArmTask.TASK_UNSPECIFIED
+        self.nominal_seeded = False
+        self.nominal_seed_ready_at = 0.0
+        self.pending_nominal_seed_mode: str | None = None
+        self.up_down_z_motion_direction = 0
+        self.up_down_z_reference: float | None = None
+        self.up_down_x_reference: float | None = None
+        self.up_down_y_reference: float | None = None
+        self.last_up_down_control_time: float | None = None
+        self.last_received_joint0_deg: float | None = None
 
         self.pub_arm_json = self.create_publisher(
             ArmString,
-            "/arm_Command",
+            self.arm_command_topic,
             qos,
         )
-        self.sub_arm_angles = self.create_subscription(
+        self.sub_arm_state = self.create_subscription(
             ArmState,
-            "/arm/state",
-            self.on_arm_angles,
+            self.arm_state_topic,
+            self.on_arm_state,
+            qos,
+        )
+        self.sub_arm_task = self.create_subscription(
+            ArmTask,
+            self.arm_task_topic,
+            self.on_arm_task,
             qos,
         )
         wireless_qos = QoSProfile(
@@ -89,73 +112,80 @@ class ArmControllerNode(Node):
         )
         self.sub_wireless = self.create_subscription(
             WirelessController,
-            "/wirelesscontroller",
+            self.wireless_topic,
             self.on_wireless,
             wireless_qos,
         )
-        self.sub_up_down_intent = self.create_subscription(
-            Int32,
-            self.UP_DOWN_INTENT_TOPIC,
-            self.on_up_down_intent,
-            10,
-        )
-        self.publish_arm_pose_target(self.FRONT_BACK_ARM_POSE)
+
+        self.publish_arm_pose_target(self.DEFAULT_ARM_POSE)
         self.publish_gripper_target(self.GRIPPER_CLOSED_ANGLE_DEG)
         time.sleep(self.MOTION_SETTLE_DELAY_S)
         self.publish_joint0_damping_command()
 
-    def on_arm_angles(self, msg: ArmState) -> None:
-        if len(msg.angle_deg) == 0:
+    def on_arm_task(self, msg: ArmTask) -> None:
+        task = int(msg.task)
+        if task == ArmTask.TASK_FRONT_BACK_PRESET:
+            self._apply_preset_task(
+                mode="front_back_mode",
+                target_deg=msg.preset_joint_configuration_deg[:6],
+                update_mask=msg.preset_joint_update_mask[:6],
+            )
+            self.active_tracking_task = ArmTask.TASK_FRONT_BACK_TRACK
+            return
+        if task == ArmTask.TASK_UP_DOWN_PRESET:
+            self._apply_preset_task(
+                mode="up_down_mode",
+                target_deg=msg.preset_joint_configuration_deg[:6],
+                update_mask=msg.preset_joint_update_mask[:6],
+            )
+            self.active_tracking_task = ArmTask.TASK_UP_DOWN_TRACK
+            self.up_down_z_motion_direction = 0
+            return
+        if task == ArmTask.TASK_FRONT_BACK_TRACK:
+            if self.active_solver_mode != "front_back_mode":
+                self._begin_solver_mode("front_back_mode", settle_delay_s=0.0)
+            self.active_tracking_task = ArmTask.TASK_FRONT_BACK_TRACK
+            return
+        if task == ArmTask.TASK_UP_DOWN_TRACK:
+            if self.active_solver_mode != "up_down_mode":
+                self._begin_solver_mode("up_down_mode", settle_delay_s=0.0)
+            self.active_tracking_task = ArmTask.TASK_UP_DOWN_TRACK
+            self.up_down_z_motion_direction = max(-1, min(1, int(msg.z_motion_direction)))
+
+    def on_arm_state(self, msg: ArmState) -> None:
+        if len(msg.angle_deg) < 6:
             return
 
-        current_q = np.asarray(msg.angle_deg[:6], dtype=float)
-        current_joint0_deg = float(current_q[0])
-        previous_joint0_deg = self._last_received_joint0_deg
-        self._last_received_joint0_deg = current_joint0_deg
+        current_q_deg = np.asarray(msg.angle_deg[:6], dtype=float)
+        self.latest_arm_angles_deg = current_q_deg
+        current_joint0_deg = float(current_q_deg[0])
+        previous_joint0_deg = self.last_received_joint0_deg
+        self.last_received_joint0_deg = current_joint0_deg
+
         if len(msg.angle_deg) > 6:
             self.latest_gripper_angle_deg = float(msg.angle_deg[6])
 
-        q_in = current_q.copy()
-        q_in[0] = -q_in[0]
-        q_in[3] = -q_in[3]
-
-        if not self._nominal_seeded:
-            if time.monotonic() < self._nominal_seed_ready_at:
-                return
-            self._finalize_nominal_seed(q_in)
-
         joint4_current = float(msg.current[4]) if len(msg.current) > 4 else 0.0
-        joint5_current = float(msg.current[5]) if len(msg.current) > 5 else 0.0
-
         self.handle_joint0_current_control(joint4_current)
-        self.update_solver_mode_from_joint5_current(q_in, joint5_current)
 
-        if (
-            self._active_solver_mode != "up_down_mode"
-            and previous_joint0_deg is not None
-            and abs(current_joint0_deg - previous_joint0_deg) < self.FRONT_BACK_IK_UPDATE_JOINT0_THRESHOLD
-        ):
+        current_q_solver_deg = self._to_solver_configuration(current_q_deg)
+
+        if not self.nominal_seeded:
+            self._maybe_finalize_nominal_seed(current_q_solver_deg)
+            self.publish_arm_commands(current_q_deg)
             return
 
-        try:
-            q_out_solver = self.solve_ik(q_in)
-            if q_out_solver is None:
-                return
-            q_out = q_out_solver.copy()
-            q_out[0] = -q_out[0]
-            q_out[3] = -q_out[3]
-            self.publish_arm_commands(q_in, q_out_solver, q_out)
-        except RuntimeError:
-            return
-
-    def on_up_down_intent(self, msg: Int32) -> None:
-        self._latest_up_down_intent = int(msg.data)
-        self._last_up_down_intent_time = time.monotonic()
+        self._maybe_update_tracking_target(
+            current_q_solver_deg=current_q_solver_deg,
+            previous_joint0_deg=previous_joint0_deg,
+            current_joint0_deg=current_joint0_deg,
+        )
+        self.publish_arm_commands(current_q_deg)
 
     def on_wireless(self, msg: WirelessController) -> None:
         current_keys = int(msg.keys)
-        previous_keys = self._last_wireless_keys
-        self._last_wireless_keys = current_keys
+        previous_keys = self.last_wireless_keys
+        self.last_wireless_keys = current_keys
 
         x_pressed = bool(current_keys & (1 << 10)) and not bool(previous_keys & (1 << 10))
         b_pressed = bool(current_keys & (1 << 9)) and not bool(previous_keys & (1 << 9))
@@ -165,27 +195,55 @@ class ArmControllerNode(Node):
         elif b_pressed:
             self.publish_gripper_target(self.GRIPPER_CLOSED_ANGLE_DEG)
 
-    def _finalize_nominal_seed(self, q_in: np.ndarray) -> None:
-        self.solver.save_current_configuration_as_q0(q_in)
+    def _apply_preset_task(
+        self,
+        *,
+        mode: str,
+        target_deg: list[float],
+        update_mask: list[int],
+    ) -> None:
+        materialized_target_deg = np.asarray(target_deg[:6], dtype=float)
+        materialized_update_mask = tuple(int(value) for value in update_mask[:6])
+        self.latest_target_joint_configuration_deg = materialized_target_deg
+        self.latest_target_joint_update_mask = materialized_update_mask
+        servo_targets_deg: list[float | None] = [None] * 6
+        for joint_index, should_update in enumerate(materialized_update_mask):
+            if should_update:
+                servo_targets_deg[joint_index] = float(materialized_target_deg[joint_index])
+        self.publish_arm_pose_target(servo_targets_deg)
+        self._begin_solver_mode(mode, settle_delay_s=self.MOTION_SETTLE_DELAY_S)
 
-        if self._pending_nominal_seed_mode == "up_down_mode":
+    def _begin_solver_mode(self, mode: str, *, settle_delay_s: float) -> None:
+        self.active_solver_mode = mode
+        self.pending_nominal_seed_mode = mode
+        self.nominal_seeded = False
+        self.nominal_seed_ready_at = time.monotonic() + max(0.0, settle_delay_s)
+
+    def _maybe_finalize_nominal_seed(self, current_q_solver_deg: np.ndarray) -> None:
+        if self.pending_nominal_seed_mode is None:
+            return
+        if time.monotonic() < self.nominal_seed_ready_at:
+            return
+
+        self.solver.save_current_configuration_as_q0(current_q_solver_deg)
+        if self.pending_nominal_seed_mode == "up_down_mode":
             self.capture_up_down_references()
-        elif self._pending_nominal_seed_mode == "front_back_mode":
-            self._up_down_x_reference = None
-            self._up_down_y_reference = None
-            self._up_down_z_reference = None
-            self._last_up_down_control_time = None
+        else:
+            self.up_down_x_reference = None
+            self.up_down_y_reference = None
+            self.up_down_z_reference = None
+            self.last_up_down_control_time = None
 
-        self._pending_nominal_seed_mode = None
-        self._nominal_seeded = True
+        self.pending_nominal_seed_mode = None
+        self.nominal_seeded = True
 
     def capture_up_down_references(self) -> None:
-        self._up_down_x_reference = float(self.solver.nominal_end_effector_x)
-        self._up_down_y_reference = float(self.solver.nominal_end_effector_y)
-        self._up_down_z_reference = self.clamp_up_down_z_reference(
+        self.up_down_x_reference = float(self.solver.nominal_end_effector_x)
+        self.up_down_y_reference = float(self.solver.nominal_end_effector_y)
+        self.up_down_z_reference = self.clamp_up_down_z_reference(
             float(self.solver.nominal_end_effector_z)
         )
-        self._last_up_down_control_time = time.monotonic()
+        self.last_up_down_control_time = time.monotonic()
 
     def clamp_up_down_z_reference(self, z_reference: float) -> float:
         return min(
@@ -193,151 +251,136 @@ class ArmControllerNode(Node):
             max(self.UP_DOWN_Z_REF_MIN_M, z_reference),
         )
 
-    def update_up_down_z_reference_from_intent(self, now: float) -> bool:
-        dt = now - self._last_up_down_control_time
-        self._last_up_down_control_time = now
-        if dt <= 0.0:
-            return False
-        if now < self._next_mode_switch_time:
-            return False
+    def _maybe_update_tracking_target(
+        self,
+        *,
+        current_q_solver_deg: np.ndarray,
+        previous_joint0_deg: float | None,
+        current_joint0_deg: float,
+    ) -> None:
+        if self.active_tracking_task == ArmTask.TASK_UP_DOWN_TRACK:
+            self._update_up_down_target(current_q_solver_deg)
+            return
+        if self.active_tracking_task != ArmTask.TASK_FRONT_BACK_TRACK:
+            return
 
+        should_solve = (
+            self.latest_target_joint_configuration_deg is None
+            or self.latest_target_joint_update_mask != self.FRONT_BACK_TRACK_UPDATE_MASK
+            or previous_joint0_deg is None
+            or abs(current_joint0_deg - previous_joint0_deg)
+            >= self.FRONT_BACK_IK_UPDATE_JOINT0_THRESHOLD
+        )
+        if not should_solve:
+            return
+
+        q_out_solver_deg = self.solver.solve_front_back(
+            current_q_solver_deg,
+            self.solver.q0_deg,
+        )
+        self.latest_target_joint_configuration_deg = self._from_solver_configuration(
+            q_out_solver_deg
+        )
+        self.latest_target_joint_update_mask = self.FRONT_BACK_TRACK_UPDATE_MASK
+
+    def _update_up_down_target(self, current_q_solver_deg: np.ndarray) -> None:
         if (
-            self._latest_up_down_intent is None
-            or self._last_up_down_intent_time is None
-            or (now - self._last_up_down_intent_time) > 0.5
+            self.up_down_x_reference is None
+            or self.up_down_y_reference is None
+            or self.up_down_z_reference is None
         ):
+            self.capture_up_down_references()
+
+        should_solve = self._update_up_down_z_reference(time.monotonic())
+        if (
+            self.latest_target_joint_configuration_deg is None
+            or self.latest_target_joint_update_mask != self.UP_DOWN_TRACK_UPDATE_MASK
+        ):
+            should_solve = True
+        if not should_solve:
+            return
+
+        q_out_solver_deg = self.solver.solve_up_down(
+            current_q_solver_deg,
+            self.up_down_z_reference,
+            self.solver.q0_deg,
+            x_reference=self.up_down_x_reference,
+            y_reference=self.up_down_y_reference,
+        )
+        self.latest_target_joint_configuration_deg = self._from_solver_configuration(
+            q_out_solver_deg
+        )
+        self.latest_target_joint_update_mask = self.UP_DOWN_TRACK_UPDATE_MASK
+
+    def _update_up_down_z_reference(self, now: float) -> bool:
+        if self.last_up_down_control_time is None:
+            self.last_up_down_control_time = now
             return False
 
-        direction = 0.0
-        if self._latest_up_down_intent == self.UP_DOWN_INCREASE_INTENT_LABEL:
-            direction = 1.0
-        elif self._latest_up_down_intent == self.UP_DOWN_DECREASE_INTENT_LABEL:
-            direction = -1.0
-        elif self._latest_up_down_intent == self.UP_DOWN_IDLE_INTENT_LABEL:
-            direction = 0.0
-
-        if direction == 0.0:
+        dt = now - self.last_up_down_control_time
+        self.last_up_down_control_time = now
+        if dt <= 0.0 or self.up_down_z_reference is None:
+            return False
+        if self.up_down_z_motion_direction == 0:
             return False
 
         updated_z_reference = self.clamp_up_down_z_reference(
-            self._up_down_z_reference + direction * self.UP_DOWN_Z_VELOCITY_MPS * dt
+            self.up_down_z_reference
+            + float(self.up_down_z_motion_direction) * self.UP_DOWN_Z_VELOCITY_MPS * dt
         )
-        if abs(updated_z_reference - self._up_down_z_reference) <= 1e-6:
+        if abs(updated_z_reference - self.up_down_z_reference) <= 1e-6:
             return False
 
-        self._up_down_z_reference = updated_z_reference
+        self.up_down_z_reference = updated_z_reference
         return True
 
-    def update_solver_mode_from_joint5_current(
-        self,
-        q_in: np.ndarray,
-        joint5_current: float,
-    ) -> None:
-        """Check joint-5 overcurrent on every state callback and update active mode."""
-        current_mode = self._active_solver_mode
-        if current_mode is None:
-            joint5_angle = float(q_in[5])
-            if min(self.FRONT_BACK_MODE_RANGE_DEG) <= joint5_angle <= max(
-                self.FRONT_BACK_MODE_RANGE_DEG
-            ):
-                current_mode = "front_back_mode"
-            elif min(self.UP_DOWN_MODE_RANGE_DEG) <= joint5_angle <= max(
-                self.UP_DOWN_MODE_RANGE_DEG
-            ):
-                current_mode = "up_down_mode"
-        if current_mode is None:
-            current_mode = "front_back_mode"
+    def _to_solver_configuration(self, joint_configuration_deg: np.ndarray) -> np.ndarray:
+        q_solver_deg = np.asarray(joint_configuration_deg, dtype=float).copy()
+        q_solver_deg[0] = -q_solver_deg[0]
+        q_solver_deg[3] = -q_solver_deg[3]
+        return q_solver_deg
 
-        next_solver_mode = current_mode
-        now = time.monotonic()
-
-        if joint5_current > self.MODE_SWITCH_JOINT5_CURRENT_THRESHOLD:
-            if (
-                not self._joint5_current_switch_latched
-                and now >= self._next_mode_switch_time
-            ):
-                if current_mode == "front_back_mode":
-                    next_solver_mode = "up_down_mode"
-                else:
-                    next_solver_mode = "front_back_mode"
-                self._joint5_current_switch_latched = True
-        else:
-            self._joint5_current_switch_latched = False
-
-        if current_mode != next_solver_mode:
-            if next_solver_mode == "up_down_mode":
-                self.publish_arm_pose_target(
-                    self.UP_DOWN_ARM_POSE
-                )
-            elif next_solver_mode == "front_back_mode":
-                self.publish_arm_pose_target(
-                    self.FRONT_BACK_ARM_POSE
-                )
-            self._pending_nominal_seed_mode = next_solver_mode
-            self._nominal_seeded = False
-            self._nominal_seed_ready_at = now + self.MOTION_SETTLE_DELAY_S
-            self._next_mode_switch_time = now + self.MOTION_SETTLE_DELAY_S
-
-        self._active_solver_mode = next_solver_mode
-
-    def solve_ik(
-        self,
-        q_in: np.ndarray,
-    ) -> np.ndarray | None:
-        if self._active_solver_mode == "up_down_mode":
-            if (
-                self._up_down_x_reference is None
-                or self._up_down_y_reference is None
-                or self._up_down_z_reference is None
-            ):
-                self.capture_up_down_references()
-            if not self.update_up_down_z_reference_from_intent(time.monotonic()):
-                return None
-            return self.solver.solve_up_down(
-                q_in,
-                self._up_down_z_reference,
-                self.solver.q0_deg,
-                x_reference=self._up_down_x_reference,
-                y_reference=self._up_down_y_reference,
-            )
-
-        return self.solver.solve_front_back(q_in, self.solver.q0_deg)
+    def _from_solver_configuration(self, joint_configuration_deg: np.ndarray) -> np.ndarray:
+        q_target_deg = np.asarray(joint_configuration_deg, dtype=float).copy()
+        q_target_deg[0] = -q_target_deg[0]
+        q_target_deg[3] = -q_target_deg[3]
+        return q_target_deg
 
     def handle_joint0_current_control(self, joint4_current: float) -> None:
-        if self._joint0_is_damped:
+        if self.joint0_is_damped:
             if joint4_current < self.FRONT_BACK_JOINT4_CURRENT_THRESHOLD:
                 self.publish_arm_pose_target(
                     [90.0, None, None, None, None, None],
                     delay_ms=500,
                 )
-                self._joint0_is_damped = False
+                self.joint0_is_damped = False
             return
 
         if joint4_current > self.FRONT_BACK_JOINT4_CURRENT_THRESHOLD:
             self.publish_joint0_damping_command()
-            self._joint0_is_damped = True
+            self.joint0_is_damped = True
 
-    def publish_arm_commands(
-        self,
-        q_in: np.ndarray,
-        q_out_solver: np.ndarray,
-        q_out: np.ndarray,
-    ) -> None:
+    def publish_arm_commands(self, current_q_deg: np.ndarray) -> None:
         joints_to_update: list[int] = []
         gripper_needs_update = False
-        joints_to_consider = self.FRONT_BACK_IK_PUBLISH_JOINT_INDICES
-        if self._active_solver_mode == "up_down_mode":
-            joints_to_consider = self.UP_DOWN_IK_PUBLISH_JOINT_INDICES
 
-        for joint_index in joints_to_consider:
-            joint_delta = abs(float(q_in[joint_index]) - float(q_out_solver[joint_index]))
-            if joint_delta <= self.COMMAND_THRESHOLD_DEG:
-                continue
-            joints_to_update.append(joint_index)
+        if self.latest_target_joint_configuration_deg is not None:
+            for joint_index, should_update in enumerate(self.latest_target_joint_update_mask):
+                if not should_update:
+                    continue
+                if joint_index == 0 and self.joint0_is_damped:
+                    continue
+                joint_delta = abs(
+                    float(current_q_deg[joint_index])
+                    - float(self.latest_target_joint_configuration_deg[joint_index])
+                )
+                if joint_delta <= self.COMMAND_THRESHOLD_DEG:
+                    continue
+                joints_to_update.append(joint_index)
 
         if (
             self.latest_gripper_angle_deg is None
-            or abs(self.latest_gripper_angle_deg - self._gripper_target_angle_deg)
+            or abs(self.latest_gripper_angle_deg - self.gripper_target_angle_deg)
             > self.COMMAND_THRESHOLD_DEG
         ):
             gripper_needs_update = True
@@ -350,18 +393,17 @@ class ArmControllerNode(Node):
             joints_to_publish = [4] + [
                 joint_index for joint_index in joints_to_publish if joint_index != 4
             ]
-        if not joints_to_publish:
-            if gripper_needs_update:
-                self.publish_gripper_target(self._gripper_target_angle_deg)
-            return
 
-        servo_targets_deg: list[float | None] = [None] * 6
-        for joint_index in joints_to_publish:
-            servo_targets_deg[joint_index] = float(q_out[joint_index])
-        self.publish_arm_pose_target(servo_targets_deg)
+        if joints_to_publish and self.latest_target_joint_configuration_deg is not None:
+            servo_targets_deg: list[float | None] = [None] * 6
+            for joint_index in joints_to_publish:
+                servo_targets_deg[joint_index] = float(
+                    self.latest_target_joint_configuration_deg[joint_index]
+                )
+            self.publish_arm_pose_target(servo_targets_deg)
 
         if gripper_needs_update:
-            self.publish_gripper_target(self._gripper_target_angle_deg)
+            self.publish_gripper_target(self.gripper_target_angle_deg)
 
     def publish_joint0_damping_command(self) -> None:
         payload = {
@@ -400,24 +442,22 @@ class ArmControllerNode(Node):
             msg.data = json.dumps(payload, separators=(",", ":"))
             self.pub_arm_json.publish(msg)
 
-    def publish_gripper_target(
-        self,
-        angle_deg: float,
-    ) -> None:
-        self._gripper_target_angle_deg = float(angle_deg)
+    def publish_gripper_target(self, angle_deg: float) -> None:
+        self.gripper_target_angle_deg = float(angle_deg)
         payload = {
             "seq": 4,
             "address": 1,
             "funcode": 1,
             "data": {
                 "id": 6,
-                "angle": self._gripper_target_angle_deg,
+                "angle": self.gripper_target_angle_deg,
                 "delay_ms": 0,
             },
         }
         msg = ArmString()
         msg.data = json.dumps(payload, separators=(",", ":"))
         self.pub_arm_json.publish(msg)
+
 
 def main() -> None:
     rclpy.init()
