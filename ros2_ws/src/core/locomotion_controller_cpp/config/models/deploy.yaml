@@ -1,23 +1,87 @@
-joint_ids_map: [3,4,5,0,1,2,9,10,11,6,7,8,]
+# Deployment config for this exported policy.
+# ONNX IO: obs [1, 51] -> actions [1, 12]
+
+metadata:
+  model_io:
+    input_name: obs
+    input_shape: [1, 51]
+    output_name: actions
+    output_shape: [1, 12]
+  observation_layout:
+    - name: base_ang_vel
+      dim: 3
+      units: rad/s
+      source: imu gyroscope in body frame
+    - name: projected_gravity
+      dim: 3
+      units: unitless
+      source: gravity direction projected into body frame
+    - name: velocity_commands
+      dim: 3
+      units: [m/s, m/s, rad/s]
+      source: commanded base velocity input [lin_vel_x, lin_vel_y, ang_vel_z]
+      implementation_note: current Go2 deploy code wires this from joystick ly, -lx, -rx
+      note: current deploy code clamps raw joystick axes directly instead of rescaling them into command ranges
+    - name: joint_pos_rel
+      dim: 12
+      units: rad
+      source: leg joint position minus default_joint_pos
+    - name: joint_vel_rel
+      dim: 12
+      units: rad/s
+      source: leg joint velocity
+    - name: last_action
+      dim: 12
+      units: policy_action
+      source: previous raw network action before action scaling and offset
+    - name: arm_joint_pos
+      dim: 6
+      units: rad
+      source: arm joint position minus arm default pose
+  action_layout:
+    - name: actions
+      dim: 12
+      units: policy_action
+      source: raw ONNX output
+    - name: processed_joint_targets
+      dim: 12
+      units: rad
+      source: raw_action * 0.5 + default_joint_pos
+
+joint_ids_map: [3,4,5,0,1,2,9,10,11,6,7,8]
 step_dt: 0.02
 stiffness: [20, 20, 40, 20, 20, 40, 20, 20, 40, 20, 20, 40]
-damping:   [ 1,  1,  2,  1,  1,  2,  1,  1,  2,  1,  1,  2]
-default_joint_pos: [-0.1,0.9,-1.8, 0.1,0.9,-1.8, -0.1,0.9,-1.8, 0.1,0.9,-1.8]
+damping: [1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2]
+default_joint_pos: [-0.1, 0.9, -1.8, 0.1, 0.9, -1.8, -0.1, 0.9, -1.8, 0.1, 0.9, -1.8]
 
 commands:
   base_velocity:
     ranges:
-      lin_vel_x: [-0.5, 1.0]
-      lin_vel_y: [-0.5, 0.5]
+      lin_vel_x: [-1.5, 1.5]
+      lin_vel_y: [-1.0, 1.0]
       ang_vel_z: [-1.0, 1.0]
       heading: null
+
 actions:
   JointPositionAction:
     clip: null
-    joint_names: [.*]
+    joint_names:
+      - FL_hip_joint
+      - FL_thigh_joint
+      - FL_calf_joint
+      - FR_hip_joint
+      - FR_thigh_joint
+      - FR_calf_joint
+      - RL_hip_joint
+      - RL_thigh_joint
+      - RL_calf_joint
+      - RR_hip_joint
+      - RR_thigh_joint
+      - RR_calf_joint
     scale: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
-    offset: [-0.1,0.9,-1.8, 0.1,0.9,-1.8, -0.1,0.9,-1.8, 0.1,0.9,-1.8]
-    joint_ids: null
+    offset: [-0.1, 0.9, -1.8, 0.1, 0.9, -1.8, -0.1, 0.9, -1.8, 0.1, 0.9, -1.8]
+    joint_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+
 observations:
   base_ang_vel:
     params: {}
@@ -30,17 +94,47 @@ observations:
     scale: [1.0, 1.0, 1.0]
     history_length: 1
   velocity_commands:
-    params: { command_name: base_velocity }
+    params: {command_name: base_velocity}
     clip: null
-    scale: [ 1.0, 1.0, 1.0 ]
+    scale: [1.0, 1.0, 1.0]
     history_length: 1
   joint_pos_rel:
-    params: {}
+    params:
+      asset_cfg:
+        joint_names:
+          - FL_hip_joint
+          - FL_thigh_joint
+          - FL_calf_joint
+          - FR_hip_joint
+          - FR_thigh_joint
+          - FR_calf_joint
+          - RL_hip_joint
+          - RL_thigh_joint
+          - RL_calf_joint
+          - RR_hip_joint
+          - RR_thigh_joint
+          - RR_calf_joint
+        joint_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     clip: null
     scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     history_length: 1
   joint_vel_rel:
-    params: {}
+    params:
+      asset_cfg:
+        joint_names:
+          - FL_hip_joint
+          - FL_thigh_joint
+          - FL_calf_joint
+          - FR_hip_joint
+          - FR_thigh_joint
+          - FR_calf_joint
+          - RL_hip_joint
+          - RL_thigh_joint
+          - RL_calf_joint
+          - RR_hip_joint
+          - RR_thigh_joint
+          - RR_calf_joint
+        joint_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     clip: null
     scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     history_length: 1
@@ -48,4 +142,19 @@ observations:
     params: {}
     clip: null
     scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    history_length: 1
+  arm_joint_pos:
+    params:
+      joint_names:
+        - joint1
+        - joint2
+        - joint3
+        - joint4
+        - joint5
+        - joint6
+      joint_ids: [0, 1, 2, 3, 4, 5]
+      default_joint_pos: [0.0, -1.5, 1.5, 0.0, 0.0, 0.0]
+      relative_to_default: true
+    clip: null
+    scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     history_length: 1

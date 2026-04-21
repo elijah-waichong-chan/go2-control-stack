@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "ament_index_cpp/get_package_share_directory.hpp"
+#include "hq_pcot_msgs/msg/arm_state.hpp"
 #include "hq_pcot_msgs/msg/locomotion_cmd.hpp"
 #include "hq_pcot_msgs/msg/loop_status.hpp"
 #include "locomotion_controller_cpp/common.hpp"
@@ -102,6 +103,8 @@ std::vector<float> ZeroForShape(const std::vector<int64_t>& shape)
   return std::vector<float>(size, 0.0F);
 }
 
+constexpr float kDegToRad = static_cast<float>(M_PI / 180.0);
+
 }  // namespace
 
 struct ObservationTerm
@@ -109,6 +112,9 @@ struct ObservationTerm
   std::string name;
   std::vector<float> scale;
   std::optional<std::pair<float, float>> clip;
+  std::vector<int> joint_ids;
+  std::vector<float> default_joint_pos;
+  bool relative_to_default{false};
   int history_length{1};
   std::deque<std::vector<float>> buffer;
 };
@@ -143,6 +149,7 @@ public:
     auto sensor_qos = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
     auto command_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
     auto status_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
+    auto arm_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
 
     pub_lowcmd_ = this->create_publisher<unitree_go::msg::LowCmd>(lowcmd_topic_, command_qos);
     pub_status_ = this->create_publisher<hq_pcot_msgs::msg::LoopStatus>(status_topic_, status_qos);
@@ -154,6 +161,9 @@ public:
     sub_cmd_ = this->create_subscription<hq_pcot_msgs::msg::LocomotionCmd>(
       locomotion_cmd_topic_, sensor_qos,
       std::bind(&PolicyControllerNode::OnLocomotionCmd, this, std::placeholders::_1));
+    sub_arm_state_ = this->create_subscription<hq_pcot_msgs::msg::ArmState>(
+      "/arm/state", arm_qos,
+      std::bind(&PolicyControllerNode::OnArmState, this, std::placeholders::_1));
     sub_standing_ = this->create_subscription<hq_pcot_msgs::msg::LoopStatus>(
       "/status/standing_init", status_qos,
       std::bind(&PolicyControllerNode::OnStandingStatus, this, std::placeholders::_1));
@@ -245,6 +255,16 @@ private:
       if (cfg["clip"] && !cfg["clip"].IsNull())
       {
         term.clip = std::make_pair(cfg["clip"][0].as<float>(), cfg["clip"][1].as<float>());
+      }
+      const YAML::Node params = cfg["params"];
+      if (params && params.IsMap())
+      {
+        term.joint_ids = LoadIntVector(params["joint_ids"]);
+        term.default_joint_pos = LoadFloatVector(params["default_joint_pos"]);
+        if (params["relative_to_default"])
+        {
+          term.relative_to_default = params["relative_to_default"].as<bool>();
+        }
       }
       term.history_length = std::max(1, cfg["history_length"] ? cfg["history_length"].as<int>() : 1);
       obs_terms_.push_back(term);
@@ -365,15 +385,21 @@ private:
     last_cmd_time_ns_ = this->get_clock()->now().nanoseconds();
   }
 
+  void OnArmState(const hq_pcot_msgs::msg::ArmState::SharedPtr msg)
+  {
+    last_arm_state_ = msg;
+  }
+
   void OnStandingStatus(const hq_pcot_msgs::msg::LoopStatus::SharedPtr msg)
   {
     standing_ready_ = static_cast<int>(msg->status) == 3;
   }
 
   std::vector<float> ComputeTerm(
-    const std::string& name,
+    const ObservationTerm& term,
     const unitree_go::msg::LowState& lowstate)
   {
+    const std::string& name = term.name;
     if (name == "base_ang_vel")
     {
       return {
@@ -450,6 +476,32 @@ private:
       return last_raw_action_;
     }
 
+    if (name == "arm_joint_pos")
+    {
+      const std::size_t joint_count = term.joint_ids.empty() ? 6U : term.joint_ids.size();
+      std::vector<float> out(joint_count, 0.0F);
+      if (!last_arm_state_)
+      {
+        return out;
+      }
+
+      for (std::size_t i = 0; i < joint_count; ++i)
+      {
+        const int joint_index = term.joint_ids.empty() ? static_cast<int>(i) : term.joint_ids[i];
+        if (joint_index < 0 || static_cast<std::size_t>(joint_index) >= last_arm_state_->angle_deg.size())
+        {
+          continue;
+        }
+
+        out[i] = static_cast<float>(last_arm_state_->angle_deg[static_cast<std::size_t>(joint_index)]) * kDegToRad;
+        if (term.relative_to_default && i < term.default_joint_pos.size())
+        {
+          out[i] -= term.default_joint_pos[i];
+        }
+      }
+      return out;
+    }
+
     throw std::runtime_error("Unsupported observation term in deploy.yaml: " + name);
   }
 
@@ -484,7 +536,7 @@ private:
     std::vector<float> obs;
     for (auto& term : obs_terms_)
     {
-      auto value = ApplyTermPost(ComputeTerm(term.name, lowstate), term);
+      auto value = ApplyTermPost(ComputeTerm(term, lowstate), term);
       if (term.buffer.empty())
       {
         for (int i = 0; i < term.history_length; ++i)
@@ -737,6 +789,7 @@ private:
 
   rclcpp::Publisher<unitree_go::msg::LowCmd>::SharedPtr pub_lowcmd_;
   rclcpp::Publisher<hq_pcot_msgs::msg::LoopStatus>::SharedPtr pub_status_;
+  rclcpp::Subscription<hq_pcot_msgs::msg::ArmState>::SharedPtr sub_arm_state_;
   rclcpp::Subscription<unitree_go::msg::LowState>::SharedPtr sub_lowstate_;
   rclcpp::Subscription<hq_pcot_msgs::msg::LocomotionCmd>::SharedPtr sub_cmd_;
   rclcpp::Subscription<hq_pcot_msgs::msg::LoopStatus>::SharedPtr sub_standing_;
@@ -779,6 +832,7 @@ private:
   std::pair<float, float> cmd_ang_z_{-1.0F, 1.0F};
   std::vector<ObservationTerm> obs_terms_;
 
+  hq_pcot_msgs::msg::ArmState::SharedPtr last_arm_state_;
   unitree_go::msg::LowState::SharedPtr last_lowstate_;
   hq_pcot_msgs::msg::LocomotionCmd::SharedPtr last_locomotion_cmd_;
   std::optional<std::int64_t> last_lowstate_time_ns_;

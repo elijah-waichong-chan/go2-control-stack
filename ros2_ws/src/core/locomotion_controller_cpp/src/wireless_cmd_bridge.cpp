@@ -22,9 +22,9 @@ public:
     this->declare_parameter("publish_hz", 50.0);
     this->declare_parameter("cmd_timeout_s", 0.5);
     this->declare_parameter("deadzone", 0.05);
-    this->declare_parameter("scale_x", 0.6);
-    this->declare_parameter("scale_y", -0.4);
-    this->declare_parameter("scale_yaw", -1.2);
+    this->declare_parameter("scale_x", 1.0);
+    this->declare_parameter("scale_y", -1.0);
+    this->declare_parameter("scale_yaw", -1.0);
     this->declare_parameter("z_pos", 0.27);
 
     push_event_hz_ = this->get_parameter("push_event_hz").as_double();

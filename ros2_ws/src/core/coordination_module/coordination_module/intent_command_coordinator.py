@@ -22,8 +22,8 @@ class IntentCommandCoordinator(Node):
         self.declare_parameter("left_right_intent_topic", "/direction_intent/left_right")
         self.declare_parameter("locomotion_cmd_topic", "/locomotion_cmd")
         self.declare_parameter("publish_hz", 50.0)
-        self.declare_parameter("forward_x_vel", 0.5)
-        self.declare_parameter("backward_x_vel", -0.5)
+        self.declare_parameter("forward_x_vel", 0.6)
+        self.declare_parameter("backward_x_vel", -0.7)
         self.declare_parameter("idle_intent_label", 0)
         self.declare_parameter("forward_intent_label", 1)
         self.declare_parameter("backward_intent_label", 2)
@@ -36,8 +36,8 @@ class IntentCommandCoordinator(Node):
         self.declare_parameter("right_window_size", 5)
         self.declare_parameter("zero_window_size", 5)
         self.declare_parameter("zero_hold_s", 0.2)
-        self.declare_parameter("left_y_vel", 0.3)
-        self.declare_parameter("right_y_vel", -0.3)
+        self.declare_parameter("left_y_vel", 0.5)
+        self.declare_parameter("right_y_vel", -0.5)
         self.declare_parameter("left_right_intent_timeout_s", 0.5)
 
         self.forward_backward_intent_topic = str(
