@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 import time
 
+import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from hq_pcot_msgs.msg import ArmState, LoopStatus
@@ -18,7 +19,7 @@ from rclpy.qos import (
     QoSProfile,
     QoSReliabilityPolicy,
 )
-from std_msgs.msg import Int32
+from std_msgs.msg import Float32MultiArray, Int32
 from unitree_go.msg import LowState
 
 from intent_estimator.onnx_runtime import (
@@ -96,9 +97,13 @@ class UpDownIntentEstimatorNode(Node):
         self.arm_state_topic = "/arm/state"
         self.output_topic = "/direction_intent/up_down"
         self.raw_output_topic = "/direction_intent/up_down/raw"
+        self.raw_scores_topic = "/direction_intent/up_down/scores_raw"
+        self.smoothed_scores_topic = "/direction_intent/up_down/scores_smoothed"
         self.status_topic = "/status/intent_estimator/up_down"
         self.status_hz = 10.0
         self.publish_hz = 10.0
+        self.score_ema_alpha = float(self.declare_parameter("score_ema_alpha", 0.2).value)
+        self.score_ema_alpha = min(1.0, max(0.0, self.score_ema_alpha))
 
         deploy_cfg = load_deploy_cfg(resolve_deploy_path(self.model_dir))
         self.selected_features = load_selected_features(deploy_cfg)
@@ -152,6 +157,11 @@ class UpDownIntentEstimatorNode(Node):
         self.filtered_label = 0
         self.pending_label: int | None = None
         self.pending_count = 0
+        self.smoothed_prediction_scores: np.ndarray | None = None
+        self.label_order = [
+            int(self.model.metadata.index_to_label[index])
+            for index in sorted(self.model.metadata.index_to_label)
+        ]
         self.loop_times_ms: deque[float] = deque(maxlen=self.loop_stats_window)
         self.deadline_flags: deque[int] = deque(maxlen=self.loop_stats_window)
 
@@ -179,6 +189,12 @@ class UpDownIntentEstimatorNode(Node):
                 ArmState, self.arm_state_topic, self.on_arm_angles, sensor_qos
             )
         self.pub_raw_intent = self.create_publisher(Int32, self.raw_output_topic, 10)
+        self.pub_raw_scores = self.create_publisher(
+            Float32MultiArray, self.raw_scores_topic, 10
+        )
+        self.pub_smoothed_scores = self.create_publisher(
+            Float32MultiArray, self.smoothed_scores_topic, 10
+        )
         self.pub_intent = self.create_publisher(Int32, self.output_topic, 10)
         self.pub_status = self.create_publisher(LoopStatus, self.status_topic, status_qos)
         self.status_timer = self.create_timer(
@@ -194,6 +210,7 @@ class UpDownIntentEstimatorNode(Node):
             f"model={self.model.metadata.model_path}, "
             f"window={self.sliding_window_ms:.0f}ms@{self.sampling_hz:.0f}Hz, "
             f"publish={self.publish_hz:.1f}Hz, "
+            f"score_ema_alpha={self.score_ema_alpha:.2f}, "
             f"transition_confirmations={self.TRANSITION_CONFIRMATIONS}, "
             f"raw_input={self.model.metadata.input_num_features}, "
             f"input={self.model.input_name}[batch,"
@@ -201,8 +218,48 @@ class UpDownIntentEstimatorNode(Node):
             f"{self.model.metadata.num_timesteps}], "
             f"output={self.model.output_name}[batch,{self.model.metadata.output_dim}], "
             f"labels={self.model.metadata.index_to_label}, "
+            f"score_label_order={self.label_order}, "
+            f"score_topics=[{self.raw_scores_topic}, {self.smoothed_scores_topic}], "
             f"features={[feature.name for feature in self.selected_features]}"
         )
+
+    def _publish_scores(self, publisher, scores: np.ndarray) -> None:
+        msg = Float32MultiArray()
+        msg.data = [float(value) for value in np.asarray(scores, dtype=np.float32).reshape(-1)]
+        publisher.publish(msg)
+
+    def _smooth_prediction_scores(self, raw_scores: np.ndarray) -> np.ndarray:
+        raw_scores = np.asarray(raw_scores, dtype=np.float32).reshape(-1)
+        if self.smoothed_prediction_scores is None:
+            self.smoothed_prediction_scores = raw_scores.copy()
+            return self.smoothed_prediction_scores.copy()
+
+        alpha = float(self.score_ema_alpha)
+        self.smoothed_prediction_scores = (
+            alpha * raw_scores + (1.0 - alpha) * self.smoothed_prediction_scores
+        ).astype(np.float32, copy=False)
+        return self.smoothed_prediction_scores.copy()
+
+    def _select_candidate_label(self, smoothed_scores: np.ndarray) -> int:
+        thresholds_by_label = self.model.metadata.label_confidence_thresholds
+        if not thresholds_by_label:
+            pred_index = int(np.argmax(smoothed_scores))
+            return int(self.model.metadata.index_to_label.get(pred_index, pred_index))
+
+        fallback_label = self.model.metadata.fallback_label
+        for index in np.argsort(smoothed_scores)[::-1]:
+            index = int(index)
+            label = int(self.model.metadata.index_to_label.get(index, index))
+            threshold = thresholds_by_label.get(label)
+            if threshold is None:
+                return label
+            if float(smoothed_scores[index]) >= float(threshold):
+                return label
+
+        if fallback_label is not None:
+            return int(fallback_label)
+        pred_index = int(np.argmax(smoothed_scores))
+        return int(self.model.metadata.index_to_label.get(pred_index, pred_index))
 
     def _filter_transition(self, candidate_label: int) -> int:
         candidate = int(candidate_label)
@@ -365,7 +422,7 @@ class UpDownIntentEstimatorNode(Node):
             features = build_selected_feature_vector(
                 self.selected_features, source_vectors
             )
-            pred_label = self.model.push(features, time.monotonic())
+            prediction = self.model.push_result(features, time.monotonic())
         except ValueError as exc:
             self.get_logger().error(str(exc))
             return
@@ -376,14 +433,21 @@ class UpDownIntentEstimatorNode(Node):
             loop_time_ms = (time.perf_counter_ns() - start_ns) / 1e6
             self._record_loop_time_ms(loop_time_ms)
 
-        if pred_label is None:
+        if prediction is None:
             return
 
+        raw_scores = np.asarray(prediction.prediction_scores, dtype=np.float32).reshape(-1)
+        smoothed_scores = self._smooth_prediction_scores(raw_scores)
+        candidate_label = self._select_candidate_label(smoothed_scores)
+
+        self._publish_scores(self.pub_raw_scores, raw_scores)
+        self._publish_scores(self.pub_smoothed_scores, smoothed_scores)
+
         raw_out = Int32()
-        raw_out.data = int(pred_label)
+        raw_out.data = int(candidate_label)
         self.pub_raw_intent.publish(raw_out)
 
-        filtered_label = self._filter_transition(int(pred_label))
+        filtered_label = self._filter_transition(int(candidate_label))
         out = Int32()
         out.data = filtered_label
         self.pub_intent.publish(out)

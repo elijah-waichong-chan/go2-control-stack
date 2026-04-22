@@ -179,6 +179,8 @@ class ModelMetadata:
     nonzero_prediction_threshold: float | None
     zero_index: int
     nonzero_indices: tuple[int, ...]
+    label_confidence_thresholds: dict[int, float]
+    fallback_label: int | None
 
     @property
     def input_num_features(self) -> int:
@@ -199,6 +201,16 @@ class SelectedFeature:
     width: int
     source_start: int
     source_end: int
+
+
+@dataclass(frozen=True)
+class PredictionResult:
+    """One throttled model inference result."""
+
+    logits: Any
+    prediction_scores: Any
+    pred_index: int
+    pred_label: int
 
 
 def load_selected_features(deploy_cfg: dict[str, Any]) -> tuple[SelectedFeature, ...]:
@@ -387,12 +399,34 @@ def load_model_metadata(model_dir: Path) -> ModelMetadata:
     if not isinstance(raw_nonzero_indices, list):
         raise RuntimeError("inference.nonzero_indices must be a list when provided.")
     nonzero_indices = tuple(int(index) for index in raw_nonzero_indices)
+    raw_label_confidence_thresholds = inference_cfg.get("label_confidence_thresholds", {})
+    if raw_label_confidence_thresholds is None:
+        raw_label_confidence_thresholds = {}
+    if not isinstance(raw_label_confidence_thresholds, dict):
+        raise RuntimeError(
+            "inference.label_confidence_thresholds must be a mapping when provided."
+        )
+    label_confidence_thresholds = {
+        int(label): float(threshold)
+        for label, threshold in raw_label_confidence_thresholds.items()
+    }
+    fallback_label = inference_cfg.get("fallback_label")
+    if fallback_label is not None:
+        fallback_label = int(fallback_label)
 
     if prediction_rule == "nonzero_threshold":
         prediction_rule = "argmax"
         nonzero_prediction_threshold = None
         zero_index = 0
         nonzero_indices = ()
+        label_confidence_thresholds = {}
+        fallback_label = None
+
+    if prediction_rule == "label_confidence_thresholds" and not label_confidence_thresholds:
+        raise RuntimeError(
+            "inference.prediction_rule=label_confidence_thresholds requires "
+            "inference.label_confidence_thresholds."
+        )
 
     return ModelMetadata(
         model_dir=model_dir,
@@ -415,6 +449,8 @@ def load_model_metadata(model_dir: Path) -> ModelMetadata:
         nonzero_prediction_threshold=nonzero_prediction_threshold,
         zero_index=zero_index,
         nonzero_indices=nonzero_indices,
+        label_confidence_thresholds=label_confidence_thresholds,
+        fallback_label=fallback_label,
     )
 
 
@@ -570,10 +606,49 @@ class SlidingWindowIntentModel:
     def _select_prediction_index(self, scores: np.ndarray) -> int:
         """Apply the deploy-configured prediction rule to model outputs."""
         prediction_scores = self._postprocess_scores(scores)
+        if self.metadata.prediction_rule == "label_confidence_thresholds":
+            return self._select_prediction_index_with_label_thresholds(prediction_scores)
         return int(np.argmax(prediction_scores))
 
-    def push(self, features: Any, sample_time_s: float) -> int | None:
-        """Append one feature vector and return a throttled predicted label when ready."""
+    def _label_to_index(self, raw_label: int) -> int | None:
+        for index, candidate_label in self.metadata.index_to_label.items():
+            if int(candidate_label) == int(raw_label):
+                return int(index)
+        return None
+
+    def _select_prediction_index_with_label_thresholds(
+        self,
+        prediction_scores: np.ndarray,
+    ) -> int:
+        threshold_by_index: dict[int, float] = {}
+        for raw_label, threshold in self.metadata.label_confidence_thresholds.items():
+            index = self._label_to_index(raw_label)
+            if index is None:
+                raise RuntimeError(
+                    "Threshold configured for raw label %r, but it is not present in "
+                    "labels.index_to_label." % raw_label
+                )
+            threshold_by_index[index] = float(threshold)
+
+        for index in np.argsort(prediction_scores)[::-1]:
+            score = float(prediction_scores[int(index)])
+            threshold = threshold_by_index.get(int(index))
+            if threshold is None or score >= threshold:
+                return int(index)
+
+        if self.metadata.fallback_label is not None:
+            fallback_index = self._label_to_index(self.metadata.fallback_label)
+            if fallback_index is None:
+                raise RuntimeError(
+                    "Fallback raw label %r is not present in labels.index_to_label."
+                    % self.metadata.fallback_label
+                )
+            return fallback_index
+
+        return int(np.argmax(prediction_scores))
+
+    def push_result(self, features: Any, sample_time_s: float) -> PredictionResult | None:
+        """Append one feature vector and return a throttled inference result when ready."""
         vector = np.asarray(features, dtype=np.float32)
         if vector.shape != (self.metadata.input_num_features,):
             raise ValueError(
@@ -606,6 +681,20 @@ class SlidingWindowIntentModel:
         if logits.ndim == 2:
             logits = logits[0]
         logits = logits.reshape(-1)
+        prediction_scores = self._postprocess_scores(logits)
         pred_index = self._select_prediction_index(logits)
         self.last_inference_time_s = sample_time_s
-        return self.metadata.index_to_label.get(pred_index, pred_index)
+        pred_label = self.metadata.index_to_label.get(pred_index, pred_index)
+        return PredictionResult(
+            logits=logits.copy(),
+            prediction_scores=prediction_scores.copy(),
+            pred_index=int(pred_index),
+            pred_label=int(pred_label),
+        )
+
+    def push(self, features: Any, sample_time_s: float) -> int | None:
+        """Append one feature vector and return a throttled predicted label when ready."""
+        result = self.push_result(features, sample_time_s)
+        if result is None:
+            return None
+        return int(result.pred_label)

@@ -63,8 +63,8 @@ class FrontBackIntentEstimatorNode(Node):
         self.status_hz = 10.0
         self.expected_input_hz = 50.0
         self.forward_min_deg = 30.0
-        self.forward_max_deg = 85.0
-        self.backward_min_deg = 95.0
+        self.forward_max_deg = 80.0
+        self.backward_min_deg = 100.0
         self.backward_max_deg = 150.0
         self.idle_label = 0
         self.forward_label = 1

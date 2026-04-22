@@ -15,9 +15,10 @@ from rclpy.qos import (
     QoSProfile,
     QoSReliabilityPolicy,
 )
+from std_msgs.msg import Float32
 
-from arm_controller.d1_ik_solver import D1IKSolver
-from hq_pcot_msgs.msg import ArmState, ArmTask
+from arm_controller.d1_ik_solver import D1IKSolver, IKSolveError
+from hq_pcot_msgs.msg import ArmCommand, ArmState, ArmTask
 from unitree_arm.msg import ArmString
 from unitree_go.msg import WirelessController
 
@@ -25,16 +26,17 @@ from unitree_go.msg import WirelessController
 class ArmControllerNode(Node):
     GRIPPER_CLOSED_ANGLE_DEG = -15.0
     GRIPPER_OPEN_ANGLE_DEG = 50.0
+    COMMAND_STATE_PUBLISH_HZ = 10.0
 
     DEFAULT_ARM_POSE = [90.0, -10.0, 10.0, -85.0, -3.0, -90.0]
     FRONT_BACK_TRACK_UPDATE_MASK = (0, 1, 1, 1, 1, 1)
-    FRONT_BACK_IK_UPDATE_JOINT0_THRESHOLD = 1.0
+    FRONT_BACK_IK_UPDATE_JOINT0_THRESHOLD = 0.1
     FRONT_BACK_JOINT4_CURRENT_THRESHOLD = 100.0
 
     UP_DOWN_TRACK_UPDATE_MASK = (0, 1, 1, 0, 1, 0)
-    UP_DOWN_Z_VELOCITY_MPS = 0.02
-    UP_DOWN_Z_REF_MIN_M = -0.10
-    UP_DOWN_Z_REF_MAX_M = 0.50
+    UP_DOWN_Z_VELOCITY_MPS = 0.1
+    UP_DOWN_Z_REF_MIN_M = 0.20
+    UP_DOWN_Z_REF_MAX_M = 0.65
 
     COMMAND_THRESHOLD_DEG = 0.1
     MOTION_SETTLE_DELAY_S = 2.0
@@ -45,11 +47,19 @@ class ArmControllerNode(Node):
         self.declare_parameter("arm_state_topic", "/arm/state")
         self.declare_parameter("arm_task_topic", "/arm_task")
         self.declare_parameter("arm_command_topic", "/arm_Command")
+        self.declare_parameter("arm_command_state_topic", "/arm/commanded_angles")
+        self.declare_parameter("arm_z_reference_topic", "/arm/z_reference")
         self.declare_parameter("wireless_topic", "/wirelesscontroller")
 
         self.arm_state_topic = str(self.get_parameter("arm_state_topic").value)
         self.arm_task_topic = str(self.get_parameter("arm_task_topic").value)
         self.arm_command_topic = str(self.get_parameter("arm_command_topic").value)
+        self.arm_command_state_topic = str(
+            self.get_parameter("arm_command_state_topic").value
+        )
+        self.arm_z_reference_topic = str(
+            self.get_parameter("arm_z_reference_topic").value
+        )
         self.wireless_topic = str(self.get_parameter("wireless_topic").value)
 
         qos = QoSProfile(
@@ -85,12 +95,35 @@ class ArmControllerNode(Node):
         self.up_down_x_reference: float | None = None
         self.up_down_y_reference: float | None = None
         self.last_up_down_control_time: float | None = None
-        self.last_received_joint0_deg: float | None = None
+        self.last_front_back_solve_joint0_deg: float | None = None
+        self.last_commanded_angles_deg: np.ndarray | None = None
 
         self.pub_arm_json = self.create_publisher(
             ArmString,
             self.arm_command_topic,
             qos,
+        )
+        command_state_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        z_reference_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.VOLATILE,
+        )
+        self.pub_arm_command_state = self.create_publisher(
+            ArmCommand,
+            self.arm_command_state_topic,
+            command_state_qos,
+        )
+        self.pub_arm_z_reference = self.create_publisher(
+            Float32,
+            self.arm_z_reference_topic,
+            z_reference_qos,
         )
         self.sub_arm_state = self.create_subscription(
             ArmState,
@@ -115,6 +148,10 @@ class ArmControllerNode(Node):
             self.wireless_topic,
             self.on_wireless,
             wireless_qos,
+        )
+        self.command_state_timer = self.create_timer(
+            1.0 / self.COMMAND_STATE_PUBLISH_HZ,
+            self.publish_command_state,
         )
 
         self.publish_arm_pose_target(self.DEFAULT_ARM_POSE)
@@ -159,8 +196,6 @@ class ArmControllerNode(Node):
         current_q_deg = np.asarray(msg.angle_deg[:6], dtype=float)
         self.latest_arm_angles_deg = current_q_deg
         current_joint0_deg = float(current_q_deg[0])
-        previous_joint0_deg = self.last_received_joint0_deg
-        self.last_received_joint0_deg = current_joint0_deg
 
         if len(msg.angle_deg) > 6:
             self.latest_gripper_angle_deg = float(msg.angle_deg[6])
@@ -175,11 +210,18 @@ class ArmControllerNode(Node):
             self.publish_arm_commands(current_q_deg)
             return
 
-        self._maybe_update_tracking_target(
-            current_q_solver_deg=current_q_solver_deg,
-            previous_joint0_deg=previous_joint0_deg,
-            current_joint0_deg=current_joint0_deg,
-        )
+        try:
+            self._maybe_update_tracking_target(
+                current_q_solver_deg=current_q_solver_deg,
+                current_joint0_deg=current_joint0_deg,
+            )
+        except IKSolveError as exc:
+            self.get_logger().warning(
+                "IK solve failed; keeping node alive and reusing the last valid target. "
+                f"debug: {exc}"
+            )
+        except Exception as exc:
+            self.get_logger().error(f"Unexpected tracking update failure: {exc}")
         self.publish_arm_commands(current_q_deg)
 
     def on_wireless(self, msg: WirelessController) -> None:
@@ -218,6 +260,8 @@ class ArmControllerNode(Node):
         self.pending_nominal_seed_mode = mode
         self.nominal_seeded = False
         self.nominal_seed_ready_at = time.monotonic() + max(0.0, settle_delay_s)
+        if mode == "front_back_mode":
+            self.last_front_back_solve_joint0_deg = None
 
     def _maybe_finalize_nominal_seed(self, current_q_solver_deg: np.ndarray) -> None:
         if self.pending_nominal_seed_mode is None:
@@ -244,6 +288,7 @@ class ArmControllerNode(Node):
             float(self.solver.nominal_end_effector_z)
         )
         self.last_up_down_control_time = time.monotonic()
+        self.publish_z_reference()
 
     def clamp_up_down_z_reference(self, z_reference: float) -> float:
         return min(
@@ -255,7 +300,6 @@ class ArmControllerNode(Node):
         self,
         *,
         current_q_solver_deg: np.ndarray,
-        previous_joint0_deg: float | None,
         current_joint0_deg: float,
     ) -> None:
         if self.active_tracking_task == ArmTask.TASK_UP_DOWN_TRACK:
@@ -264,13 +308,22 @@ class ArmControllerNode(Node):
         if self.active_tracking_task != ArmTask.TASK_FRONT_BACK_TRACK:
             return
 
-        should_solve = (
-            self.latest_target_joint_configuration_deg is None
-            or self.latest_target_joint_update_mask != self.FRONT_BACK_TRACK_UPDATE_MASK
-            or previous_joint0_deg is None
-            or abs(current_joint0_deg - previous_joint0_deg)
-            >= self.FRONT_BACK_IK_UPDATE_JOINT0_THRESHOLD
-        )
+        solve_reasons: list[str] = []
+        if self.latest_target_joint_configuration_deg is None:
+            solve_reasons.append("no_target")
+        if self.latest_target_joint_update_mask != self.FRONT_BACK_TRACK_UPDATE_MASK:
+            solve_reasons.append("update_mask_mismatch")
+        delta_since_last_solve = None
+        if self.last_front_back_solve_joint0_deg is None:
+            solve_reasons.append("no_previous_front_back_solve")
+        else:
+            delta_since_last_solve = abs(
+                current_joint0_deg - self.last_front_back_solve_joint0_deg
+            )
+            if delta_since_last_solve >= self.FRONT_BACK_IK_UPDATE_JOINT0_THRESHOLD:
+                solve_reasons.append("joint0_threshold_reached")
+
+        should_solve = bool(solve_reasons)
         if not should_solve:
             return
 
@@ -282,6 +335,7 @@ class ArmControllerNode(Node):
             q_out_solver_deg
         )
         self.latest_target_joint_update_mask = self.FRONT_BACK_TRACK_UPDATE_MASK
+        self.last_front_back_solve_joint0_deg = current_joint0_deg
 
     def _update_up_down_target(self, current_q_solver_deg: np.ndarray) -> None:
         if (
@@ -332,6 +386,7 @@ class ArmControllerNode(Node):
             return False
 
         self.up_down_z_reference = updated_z_reference
+        self.publish_z_reference()
         return True
 
     def _to_solver_configuration(self, joint_configuration_deg: np.ndarray) -> np.ndarray:
@@ -419,6 +474,27 @@ class ArmControllerNode(Node):
         msg.data = json.dumps(payload, separators=(",", ":"))
         self.pub_arm_json.publish(msg)
 
+    def publish_command_state(self) -> None:
+        if self.last_commanded_angles_deg is None:
+            self.publish_z_reference()
+            return
+
+        msg = ArmCommand()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.angle_deg = [float(value) for value in self.last_commanded_angles_deg]
+        self.pub_arm_command_state.publish(msg)
+        self.publish_z_reference()
+
+    def publish_z_reference(self) -> None:
+        if self.up_down_z_reference is None:
+            return
+        if self.active_tracking_task != ArmTask.TASK_UP_DOWN_TRACK:
+            return
+
+        msg = Float32()
+        msg.data = float(self.up_down_z_reference)
+        self.pub_arm_z_reference.publish(msg)
+
     def publish_arm_pose_target(
         self,
         target_angles_deg: list[float | None],
@@ -441,6 +517,7 @@ class ArmControllerNode(Node):
             msg = ArmString()
             msg.data = json.dumps(payload, separators=(",", ":"))
             self.pub_arm_json.publish(msg)
+            self._update_last_commanded_angle(servo_id, float(angle_deg))
 
     def publish_gripper_target(self, angle_deg: float) -> None:
         self.gripper_target_angle_deg = float(angle_deg)
@@ -457,6 +534,12 @@ class ArmControllerNode(Node):
         msg = ArmString()
         msg.data = json.dumps(payload, separators=(",", ":"))
         self.pub_arm_json.publish(msg)
+        self._update_last_commanded_angle(6, self.gripper_target_angle_deg)
+
+    def _update_last_commanded_angle(self, joint_index: int, angle_deg: float) -> None:
+        if self.last_commanded_angles_deg is None:
+            self.last_commanded_angles_deg = np.zeros(7, dtype=np.float32)
+        self.last_commanded_angles_deg[joint_index] = np.float32(angle_deg)
 
 
 def main() -> None:

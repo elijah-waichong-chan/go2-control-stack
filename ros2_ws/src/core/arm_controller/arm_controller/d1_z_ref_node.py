@@ -7,8 +7,9 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
+from std_msgs.msg import Float32
 
-from hq_pcot_msgs.msg import ArmState
+from hq_pcot_msgs.msg import ArmCommand, ArmState
 from unitree_arm.msg import ArmString
 from unitree_go.msg import WirelessController
 
@@ -16,9 +17,12 @@ from arm_controller.d1_ik_solver import D1IKSolver
 
 
 class D1ZReferenceNode(Node):
+    GRIPPER_CLOSED_ANGLE_DEG = -15.0
+    GRIPPER_OPEN_ANGLE_DEG = 50.0
     COMMAND_THRESHOLD_DEG = 0.1
     COMMAND_COOLDOWN_S = 0.0
     COMMAND_PUBLISH_HZ = 10.0
+    COMMAND_STATE_PUBLISH_HZ = 10.0
     WIRELESS_CONTROL_HZ = 30.0
     WIRELESS_INPUT_TIMEOUT_S = 0.2
     IK_SOLVE_LOG_INTERVAL_S = 0.25
@@ -56,8 +60,10 @@ class D1ZReferenceNode(Node):
 
         arm_state_topic = "/arm/state"
         arm_command_topic = "/arm_Command"
+        arm_command_state_topic = "/arm/commanded_angles"
+        arm_z_reference_topic = "/arm/z_reference"
         wireless_topic = "/wirelesscontroller"
-        self.z_velocity_mps = 0.15
+        self.z_velocity_mps = 0.1
         self.z_ref_min_m = -0.09
         self.z_ref_max_m = 0.56
         self.ry_deadzone = 0.10
@@ -99,11 +105,35 @@ class D1ZReferenceNode(Node):
         self._last_wireless_control_time = time.monotonic()
         self._last_ik_solve_log_time = 0.0
         self._last_z_reference_log_time = 0.0
+        self.last_wireless_keys = 0
+        self.last_commanded_angles_deg: np.ndarray | None = None
 
         self.pub_arm_command = self.create_publisher(
             ArmString,
             arm_command_topic,
             pub_qos,
+        )
+        command_state_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        z_reference_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.VOLATILE,
+        )
+        self.pub_arm_command_state = self.create_publisher(
+            ArmCommand,
+            arm_command_state_topic,
+            command_state_qos,
+        )
+        self.pub_arm_z_reference = self.create_publisher(
+            Float32,
+            arm_z_reference_topic,
+            z_reference_qos,
         )
         self.sub_arm_angles = self.create_subscription(
             ArmState,
@@ -128,6 +158,10 @@ class D1ZReferenceNode(Node):
         self._wireless_control_timer = self.create_timer(
             1.0 / self.WIRELESS_CONTROL_HZ,
             self.on_wireless_control_timer,
+        )
+        self._command_state_timer = self.create_timer(
+            1.0 / self.COMMAND_STATE_PUBLISH_HZ,
+            self.publish_command_state,
         )
 
         self.get_logger().info(
@@ -157,6 +191,18 @@ class D1ZReferenceNode(Node):
         self._latest_right_stick_y = float(msg.ry)
         self._last_wireless_message_time = time.monotonic()
 
+        current_keys = int(msg.keys)
+        previous_keys = self.last_wireless_keys
+        self.last_wireless_keys = current_keys
+
+        x_pressed = bool(current_keys & (1 << 10)) and not bool(previous_keys & (1 << 10))
+        b_pressed = bool(current_keys & (1 << 9)) and not bool(previous_keys & (1 << 9))
+
+        if x_pressed:
+            self.publish_gripper_target(self.GRIPPER_OPEN_ANGLE_DEG)
+        elif b_pressed:
+            self.publish_gripper_target(self.GRIPPER_CLOSED_ANGLE_DEG)
+
     def on_wireless_control_timer(self) -> None:
         now = time.monotonic()
         dt = now - self._last_wireless_control_time
@@ -178,6 +224,7 @@ class D1ZReferenceNode(Node):
         if (now - self._last_z_reference_log_time) >= self.Z_REFERENCE_LOG_INTERVAL_S:
             self._last_z_reference_log_time = now
             self.get_logger().info(f"Updated arm z reference to {self.z_reference:.4f} m")
+        self.publish_z_reference()
         self.solve_and_publish_for_current_reference()
 
     def on_command_publish_timer(self) -> None:
@@ -238,6 +285,7 @@ class D1ZReferenceNode(Node):
         q0_z_reference = float(self.solver.q0_end_effector_z)
         self.z_reference = self.clamp_z_reference(q0_z_reference)
         self._q0_seeded = True
+        self.publish_z_reference()
         self.get_logger().info(
             "Saved current arm configuration as q0: "
             + np.array2string(self.q0_deg, precision=2, separator=", ")
@@ -329,6 +377,26 @@ class D1ZReferenceNode(Node):
         msg = ArmString()
         msg.data = json.dumps(payload, separators=(",", ":"))
         self.pub_arm_command.publish(msg)
+        self.last_commanded_angles_deg = target_angles_deg.astype(np.float32, copy=True)
+
+    def publish_command_state(self) -> None:
+        if self.last_commanded_angles_deg is None:
+            self.publish_z_reference()
+            return
+
+        msg = ArmCommand()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.angle_deg = [float(value) for value in self.last_commanded_angles_deg]
+        self.pub_arm_command_state.publish(msg)
+        self.publish_z_reference()
+
+    def publish_z_reference(self) -> None:
+        if self.z_reference is None:
+            return
+
+        msg = Float32()
+        msg.data = float(self.z_reference)
+        self.pub_arm_z_reference.publish(msg)
 
     def schedule_single_mode_command(self, delay_s: float) -> None:
         timer_holder = {"timer": None}
@@ -365,6 +433,49 @@ class D1ZReferenceNode(Node):
         msg = ArmString()
         msg.data = json.dumps(self.STARTUP_ARM_COMMAND, separators=(",", ":"))
         self.pub_arm_command.publish(msg)
+        startup_angles = self.STARTUP_ARM_COMMAND["data"]
+        self.last_commanded_angles_deg = np.asarray(
+            [
+                startup_angles["angle0"],
+                startup_angles["angle1"],
+                startup_angles["angle2"],
+                startup_angles["angle3"],
+                startup_angles["angle4"],
+                startup_angles["angle5"],
+                startup_angles["angle6"],
+            ],
+            dtype=np.float32,
+        )
+
+    def publish_gripper_target(self, angle_deg: float) -> None:
+        payload = {
+            "seq": self.COMMAND_SEQ,
+            "address": self.COMMAND_ADDRESS,
+            "funcode": 1,
+            "data": {
+                "id": 6,
+                "angle": float(angle_deg),
+                "delay_ms": 0,
+            },
+        }
+        msg = ArmString()
+        msg.data = json.dumps(payload, separators=(",", ":"))
+        self.pub_arm_command.publish(msg)
+        if self.last_commanded_angles_deg is None:
+            startup_angles = self.STARTUP_ARM_COMMAND["data"]
+            self.last_commanded_angles_deg = np.asarray(
+                [
+                    startup_angles["angle0"],
+                    startup_angles["angle1"],
+                    startup_angles["angle2"],
+                    startup_angles["angle3"],
+                    startup_angles["angle4"],
+                    startup_angles["angle5"],
+                    startup_angles["angle6"],
+                ],
+                dtype=np.float32,
+            )
+        self.last_commanded_angles_deg[6] = np.float32(angle_deg)
 
     def publish_startup_single_mode_command(self) -> None:
         if self._startup_mode_timer is not None:

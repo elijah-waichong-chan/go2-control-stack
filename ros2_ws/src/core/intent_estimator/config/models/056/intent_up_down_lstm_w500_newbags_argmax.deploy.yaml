@@ -1,0 +1,60 @@
+model:
+  format: onnx
+  path: intent_up_down_lstm_w500_newbags_argmax.onnx
+  input_name: input
+  output_name: logits
+  opset_version: 18
+  input_layout: NCT
+  dynamic_batch: true
+  num_features: 28
+  num_timesteps: 100
+  sampling_hz: 200
+  window_ms: 500
+architecture:
+  model_type: lstm
+  lstm_hidden_dim: 64
+  lstm_num_layers: 1
+  lstm_bidirectional: true
+  classifier_hidden_dim: 128
+  dropout: 0.2
+features:
+  selected:
+  - name: arm_angles
+    source_start: 31
+    source_end: 38
+    width: 7
+  - name: arm_currents
+    source_start: 38
+    source_end: 45
+    width: 7
+labels:
+  raw_label_set: [0, 5, 6]
+  label_to_index:
+    0: 0
+    5: 1
+    6: 2
+  index_to_label:
+    0: 0
+    1: 5
+    2: 6
+inference:
+  output_type: logits
+  postprocess: softmax
+  prediction_rule: label_confidence_thresholds
+  nonzero_prediction_threshold: null
+  zero_index: 0
+  nonzero_indices: [1, 2]
+  label_confidence_thresholds:
+    0: 0.5
+    5: 0.7
+    6: 0.7
+  fallback_label: 0
+preprocessing:
+  normalize: true
+  delta_features: true
+  delta_feature_mode: append
+  delta_formula: window_start_subtraction
+  num_raw_features: 14
+  gravity_comp: false
+  x_mean: [88.6115493774414, 22.096555709838867, 11.943843841552734, 5.089687347412109, -31.266799926757812, -89.17953491210938, 17.324228286743164, 223.22900390625, 312.547607421875, 206.42599487304688, 0.2593424320220947, 326.8770751953125, 0.21545307338237762, 690.952880859375, -0.0001707963674562052, -0.0463152714073658, -0.028696822002530098, 0.0014128932962194085, 0.0790092945098877, -0.001347532612271607, 0.00456285011023283, -1.2374143600463867, 1.4212838411331177, 6.119696140289307, 0.0013483252841979265, 8.278735160827637, 0.000916595512535423, 0.13562007248401642]
+  x_std: [1.0692532062530518, 35.95521545410156, 32.73705291748047, 0.2655348479747772, 50.0787353515625, 0.6901138424873352, 13.991376876831055, 173.20892333984375, 467.53900146484375, 330.1278381347656, 0.8736222386360168, 469.11834716796875, 0.6967002153396606, 363.1291198730469, 0.05143566429615021, 2.317934036254883, 2.960031032562256, 0.17374910414218903, 2.918240547180176, 0.11753973364830017, 0.21177557110786438, 88.2322769165039, 254.27481079101562, 176.76649475097656, 0.6636679172515869, 290.2894592285156, 0.5384764671325684, 255.27272033691406]

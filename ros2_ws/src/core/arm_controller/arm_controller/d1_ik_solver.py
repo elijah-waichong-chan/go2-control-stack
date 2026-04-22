@@ -14,6 +14,10 @@ from ament_index_python.packages import get_package_share_directory
 JointVector = np.ndarray
 
 
+class IKSolveError(RuntimeError):
+    """Raised when the IK backend fails but the caller should keep running."""
+
+
 @dataclass(frozen=True)
 class _ModeSettings:
     locked_to_current_joint_indices: tuple[int, ...]
@@ -289,6 +293,74 @@ class D1IKSolver:
         )
 
         start_time = time.perf_counter()
-        solution = opti.solve()
+        try:
+            solution = opti.solve()
+        except Exception as exc:
+            self.last_solve_time_ms = (time.perf_counter() - start_time) * 1000.0
+            raise IKSolveError(
+                self._build_debug_message(
+                    exc=exc,
+                    opti=opti,
+                    q_var=q_var,
+                    q_translation=q_translation,
+                    current_q_deg=current_q_deg,
+                    q0_deg=q0_deg,
+                    x_reference=x_reference,
+                    y_reference=y_reference,
+                    z_reference=z_reference,
+                )
+            ) from exc
         self.last_solve_time_ms = (time.perf_counter() - start_time) * 1000.0
         return np.asarray(solution.value(q_var), dtype=float).reshape(-1)
+
+    def _build_debug_message(
+        self,
+        *,
+        exc: Exception,
+        opti: ca.Opti,
+        q_var: ca.MX,
+        q_translation: ca.MX,
+        current_q_deg: JointVector,
+        q0_deg: JointVector,
+        x_reference: float | None,
+        y_reference: float,
+        z_reference: float,
+    ) -> str:
+        return_status = "unknown"
+        try:
+            stats = opti.stats()
+            return_status = str(stats.get("return_status", return_status))
+        except Exception:
+            pass
+
+        latest_q = self._safe_debug_value(opti, q_var)
+        latest_translation = self._safe_debug_value(opti, q_translation)
+
+        parts = [
+            "IK solve failed",
+            f"return_status={return_status}",
+            f"solve_time_ms={self.last_solve_time_ms:.2f}",
+            f"current_q_deg={self._format_array(current_q_deg)}",
+            f"q0_deg={self._format_array(q0_deg)}",
+            f"x_reference={x_reference}",
+            f"y_reference={y_reference}",
+            f"z_reference={z_reference}",
+            f"latest_q_deg={latest_q}",
+            f"latest_xyz={latest_translation}",
+            f"error={exc}",
+        ]
+        return "; ".join(parts)
+
+    def _safe_debug_value(self, opti: ca.Opti, symbol: ca.MX) -> str:
+        try:
+            value = np.asarray(opti.debug.value(symbol), dtype=float).reshape(-1)
+        except Exception:
+            return "unavailable"
+        return self._format_array(value)
+
+    def _format_array(self, values: JointVector) -> str:
+        return np.array2string(
+            np.asarray(values, dtype=float),
+            precision=3,
+            separator=", ",
+        )

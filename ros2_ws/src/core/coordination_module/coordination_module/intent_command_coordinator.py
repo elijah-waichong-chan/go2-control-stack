@@ -24,6 +24,7 @@ class IntentCommandCoordinator(Node):
     FRONT_BACK_ARM_POSE = [90.0, -10.0, 10.0, -85.0, -3.0, -90.0]
     FRONT_BACK_PRESET_MASK = (1, 1, 1, 1, 1, 1)
     FRONT_BACK_MODE_RANGE_DEG = (-85.0, -105.0)
+    FRONT_BACK_NEUTRAL_JOINT0_DEG = 90.0
 
     UP_DOWN_ARM_POSE = [None, None, None, 5.0, None, -90.0]
     UP_DOWN_PRESET_MASK = (0, 0, 0, 1, 0, 1)
@@ -47,6 +48,7 @@ class IntentCommandCoordinator(Node):
         self.declare_parameter("publish_hz", 50.0)
         self.declare_parameter("forward_x_vel", 0.5)
         self.declare_parameter("backward_x_vel", -0.5)
+        self.declare_parameter("front_back_x_vel_kp", 0.02)
         self.declare_parameter("idle_intent_label", 0)
         self.declare_parameter("forward_intent_label", 1)
         self.declare_parameter("backward_intent_label", 2)
@@ -77,6 +79,7 @@ class IntentCommandCoordinator(Node):
         self.publish_hz = max(1.0, float(self.get_parameter("publish_hz").value))
         self.forward_x_vel = float(self.get_parameter("forward_x_vel").value)
         self.backward_x_vel = float(self.get_parameter("backward_x_vel").value)
+        self.front_back_x_vel_kp = float(self.get_parameter("front_back_x_vel_kp").value)
         self.idle_intent_label = int(self.get_parameter("idle_intent_label").value)
         self.forward_intent_label = int(self.get_parameter("forward_intent_label").value)
         self.backward_intent_label = int(self.get_parameter("backward_intent_label").value)
@@ -235,6 +238,19 @@ class IntentCommandCoordinator(Node):
             or (now_ns - self.last_forward_backward_intent_time_ns) * 1e-9
             > self.forward_backward_intent_timeout_s
         ):
+            return 0.0
+
+        if self.latest_arm_angles_deg is not None and self.latest_arm_angles_deg:
+            joint0_deg = float(self.latest_arm_angles_deg[0])
+            joint0_error_deg = self.FRONT_BACK_NEUTRAL_JOINT0_DEG - joint0_deg
+            commanded_x_vel = self.front_back_x_vel_kp * joint0_error_deg
+
+            if self.latest_forward_backward_intent == self.forward_intent_label:
+                return max(0.0, min(self.forward_x_vel, commanded_x_vel))
+            if self.latest_forward_backward_intent == self.backward_intent_label:
+                return min(0.0, max(self.backward_x_vel, commanded_x_vel))
+            if self.latest_forward_backward_intent == self.idle_intent_label:
+                return 0.0
             return 0.0
 
         if self.latest_forward_backward_intent == self.forward_intent_label:

@@ -123,6 +123,8 @@ class LeftRightIntentEstimatorNode(Node):
                 "Selected feature widths sum to %d, but deploy preprocessing expects %d raw features."
                 % (selected_width, self.model.metadata.input_num_features)
             )
+        self.selected_feature_names = {feature.name for feature in self.selected_features}
+        self.requires_foot_force = "ff" in self.selected_feature_names
         self.have_lowstate = False
         self.status_code = self.STATUS_WAITING_FOR_TOPICS
         self.waiting_on: str | None = None
@@ -260,31 +262,28 @@ class LeftRightIntentEstimatorNode(Node):
         self,
         lowstate_msg: LowState,
     ) -> dict[str, object]:
+        source_vectors: dict[str, object] = {}
+        if self.requires_foot_force:
+            source_vectors["ff"] = [float(value) for value in lowstate_msg.foot_force]
         leg_dq = [
             float(lowstate_msg.motor_state[index_sdk].dq)
             for index_sdk in self.SDK_TO_URDF_LEG_INDEX
         ]
-        source_vectors: dict[str, object] = {
-            "ff": [float(value) for value in lowstate_msg.foot_force],
-            "accel": [float(value) for value in lowstate_msg.imu_state.accelerometer],
-            "dq": leg_dq,
-        }
+        source_vectors["accel"] = [
+            float(value) for value in lowstate_msg.imu_state.accelerometer
+        ]
+        source_vectors["dq"] = leg_dq
         for feature in self.selected_features:
-            if feature.name == "ff":
+            if feature.name in source_vectors:
                 continue
-            elif feature.name in source_vectors:
-                continue
-            else:
-                raise ValueError(
-                    f"Unsupported left_right deploy feature: {feature.name}"
-                )
+            raise ValueError(f"Unsupported left_right deploy feature: {feature.name}")
         return source_vectors
 
     def on_lowstate(self, msg: LowState) -> None:
         """Build a deploy-configured feature vector and publish the predicted label."""
         start_ns = time.perf_counter_ns()
         try:
-            if len(msg.foot_force) < 4:
+            if self.requires_foot_force and len(msg.foot_force) < 4:
                 raise ValueError(
                     f"Expected /lowstate foot_force to have length >= 4, got {len(msg.foot_force)}"
                 )

@@ -21,6 +21,27 @@ _ARM_CONTROLLER_MODE_ALIASES = {
     "current_ik": "current_ik_ipopt",
     "manual_control_ik": "manual_control_ik_ipopt",
 }
+ROSBAG_TOPICS: tuple[str, ...] = (
+    "/data/push_event",
+    "/lowstate",
+    "/lowcmd",
+    "/arm_task",
+    "/arm/z_reference",
+    "/arm/state",
+    "/arm/commanded_angles",
+    "/direction_intent/front_back",
+    "/direction_intent/left_right",
+    "/direction_intent/left_right/raw",
+    "/direction_intent/up_down",
+    "/direction_intent/up_down/raw",
+    "/direction_intent/up_down/scores_raw",
+    "/direction_intent/up_down/scores_smoothed",
+    "/locomotion_cmd",
+    "/joint_states",
+    "/robot_description",
+    "/tf",
+    "/tf_static",
+)
 
 
 def _resolve_repo_root() -> Path:
@@ -125,13 +146,19 @@ def start_node(
         )
 
 
-def start_rosbag_recording() -> Tuple[bool, str]:
+def start_rosbag_recording(selected_topics: Sequence[str] | None = None) -> Tuple[bool, str]:
     with _LOCK:
         repo_root = _resolve_repo_root()
         bag_name = time.strftime("go2_data_%Y%m%d_%H%M%S")
         bag_dir = repo_root / "bag_data"
         bag_path = bag_dir / bag_name
         bag_dir.mkdir(parents=True, exist_ok=True)
+        topics = list(selected_topics) if selected_topics is not None else list(ROSBAG_TOPICS)
+        if not topics:
+            return False, "select at least one rosbag topic"
+        invalid_topics = [topic for topic in topics if topic not in ROSBAG_TOPICS]
+        if invalid_topics:
+            return False, f"unsupported rosbag topics: {', '.join(invalid_topics)}"
         return _start_process(
             "rosbag_recording",
             [
@@ -142,17 +169,11 @@ def start_rosbag_recording() -> Tuple[bool, str]:
                 "mcap",
                 "-o",
                 str(bag_path),
-                "/data/push_event",
-                "/lowstate",
-                "/arm/state",
-                "/joint_states",
-                "/robot_description",
-                "/tf",
-                "/tf_static",
+                *topics,
                 # "/odometry/filtered",
                 # "/locomotion_cmd"
             ],
-            f"started rosbag recording to {bag_path}",
+            f"started rosbag recording to {bag_path} ({len(topics)} topics)",
             cwd=repo_root,
             log_path=bag_dir / f"{bag_name}.log",
         )

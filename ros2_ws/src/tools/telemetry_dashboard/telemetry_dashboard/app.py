@@ -12,7 +12,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 
-from hq_pcot_msgs.msg import ArmState, LocomotionCmd, LoopStatus, QDq
+from hq_pcot_msgs.msg import ArmCommand, ArmState, LocomotionCmd, LoopStatus, QDq
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Int32
@@ -94,6 +94,7 @@ class TelemetryNode(Node):
             "joint_states": "/joint_states",
             "tf": "/tf",
             "arm_state": "/arm/state",
+            "arm_command_state": "/arm/commanded_angles",
             "arm_feedback": "/arm_Feedback",
             "arm_command": "/arm_Command",
             "intent_forward_backward": "/direction_intent/front_back",
@@ -118,6 +119,12 @@ class TelemetryNode(Node):
             TFMessage, self._topic_names["tf"], self.on_tf, qos
         )
         self.create_subscription(ArmState, self._topic_names["arm_state"], self.on_arm_angles, qos)
+        self.create_subscription(
+            ArmCommand,
+            self._topic_names["arm_command_state"],
+            self.on_arm_command_state,
+            qos,
+        )
         self.create_subscription(
             ArmString, self._topic_names["arm_feedback"], self.on_arm_feedback, qos
         )
@@ -234,6 +241,9 @@ class TelemetryNode(Node):
 
     def on_arm_angles(self, msg: ArmState) -> None:
         self._mark_topic("arm_state")
+
+    def on_arm_command_state(self, msg: ArmCommand) -> None:
+        self._mark_topic("arm_command_state")
 
     def on_arm_feedback(self, msg: ArmString) -> None:
         self._mark_topic("arm_feedback")
@@ -378,6 +388,26 @@ def _shutdown_other_dashboard_nodes(current_node_name: str) -> int:
         if _shutdown_ros_runtime(node_name):
             stopped += 1
     return stopped
+
+
+def _normalize_ros_graph_node_name(node_name: str) -> str:
+    return node_name.strip().lstrip("/")
+
+
+def _collect_other_visible_ros_nodes(
+    snapshot: Dict[str, object],
+    current_node_name: str,
+) -> list[str]:
+    current = _normalize_ros_graph_node_name(current_node_name)
+    other_nodes: list[str] = []
+    seen: set[str] = set()
+    for node_name in snapshot.get("node_names", []):
+        normalized = _normalize_ros_graph_node_name(str(node_name))
+        if not normalized or normalized == current or normalized in seen:
+            continue
+        seen.add(normalized)
+        other_nodes.append(normalized)
+    return other_nodes
 
 
 def get_ros_node() -> TelemetryNode:
@@ -1093,6 +1123,17 @@ def _render_sidebar(node: TelemetryNode) -> None:
         if rosbag_active
         else "Start Rosbag Recording"
     )
+    default_rosbag_topics = list(launch_process_manager.ROSBAG_TOPICS)
+    selected_rosbag_topics = st.multiselect(
+        "Rosbag Topics",
+        options=default_rosbag_topics,
+        default=st.session_state.get("rosbag_topics", default_rosbag_topics),
+        key="rosbag_topics",
+        disabled=rosbag_active,
+        help="Choose which topics to record when starting rosbag. Defaults to all topics.",
+    )
+    if rosbag_active:
+        st.caption("Rosbag topic selection is locked while recording is running.")
     if st.button(
         rosbag_label,
         key="toggle_rosbag",
@@ -1102,24 +1143,22 @@ def _render_sidebar(node: TelemetryNode) -> None:
         if rosbag_active:
             ok, msg = launch_process_manager.stop_launch("rosbag_recording")
         else:
-            ok, msg = launch_process_manager.start_rosbag_recording()
+            ok, msg = launch_process_manager.start_rosbag_recording(
+                selected_rosbag_topics
+            )
         if ok:
             st.info(msg)
         else:
             st.warning(msg)
     st.caption("Danger zone")
     if st.button(
-        "Destroy Other ROS Nodes",
+        "Destroy All Other ROS Nodes",
         key="destroy_other_ros_nodes",
         use_container_width=True,
         type="primary",
     ):
+        visible_other_nodes = _collect_other_visible_ros_nodes(snapshot, current_node_name)
         other_dashboard_nodes = _shutdown_other_dashboard_nodes(current_node_name)
-        visible_other_nodes = [
-            name
-            for name in snapshot.get("node_names", [])
-            if name.lstrip("/") != current_node_name
-        ]
         launch_process_manager.stop_all()
         ok, msg = launch_process_manager.stop_ros_nodes(
             visible_other_nodes,
@@ -1177,6 +1216,7 @@ def _render_dashboard(node: TelemetryNode) -> None:
             [
                 ("arm_feedback", "arm_feedback"),
                 ("arm_state", "arm_state"),
+                ("arm_command_state", "arm_command_state"),
                 ("arm_command", "arm_command"),
             ],
         ),

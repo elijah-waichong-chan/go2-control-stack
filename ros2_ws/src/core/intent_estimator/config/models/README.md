@@ -11,8 +11,8 @@ The current model bundles in this package use a flat per-bundle layout:
 
 Example for `034`:
 
-- `034/intent_left_right.deploy.yaml`
-- `034/intent_left_right.onnx`
-- `034/intent_left_right.onnx.data`
+- `034/intent_left_right_gru_w500_e060_hpure_argmax_no_ff.deploy.yaml`
+- `034/intent_left_right_gru_w500_e060_hpure_argmax_no_ff.onnx`
+- `034/intent_left_right_gru_w500_e060_hpure_argmax_no_ff.onnx.data`
 
 The deploy YAML declares the tensor names, feature layout, label mapping, and preprocessing stats used by the runtime.
