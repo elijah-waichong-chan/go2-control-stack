@@ -414,13 +414,16 @@ def load_model_metadata(model_dir: Path) -> ModelMetadata:
     if fallback_label is not None:
         fallback_label = int(fallback_label)
 
-    if prediction_rule == "nonzero_threshold":
-        prediction_rule = "argmax"
-        nonzero_prediction_threshold = None
-        zero_index = 0
-        nonzero_indices = ()
-        label_confidence_thresholds = {}
-        fallback_label = None
+    supported_prediction_rules = {
+        "argmax",
+        "nonzero_threshold",
+        "label_confidence_thresholds",
+    }
+    if prediction_rule not in supported_prediction_rules:
+        raise RuntimeError(
+            "Unsupported inference.prediction_rule=%r. Supported values: %s."
+            % (prediction_rule, ", ".join(sorted(supported_prediction_rules)))
+        )
 
     if prediction_rule == "label_confidence_thresholds" and not label_confidence_thresholds:
         raise RuntimeError(
@@ -606,8 +609,15 @@ class SlidingWindowIntentModel:
     def _select_prediction_index(self, scores: np.ndarray) -> int:
         """Apply the deploy-configured prediction rule to model outputs."""
         prediction_scores = self._postprocess_scores(scores)
+        return self.select_prediction_index_from_scores(prediction_scores)
+
+    def select_prediction_index_from_scores(self, prediction_scores: np.ndarray) -> int:
+        """Apply the deploy-configured prediction rule to comparable prediction scores."""
+        prediction_scores = np.asarray(prediction_scores, dtype=np.float32).reshape(-1)
         if self.metadata.prediction_rule == "label_confidence_thresholds":
             return self._select_prediction_index_with_label_thresholds(prediction_scores)
+        if self.metadata.prediction_rule == "nonzero_threshold":
+            return self._select_prediction_index_with_nonzero_threshold(prediction_scores)
         return int(np.argmax(prediction_scores))
 
     def _label_to_index(self, raw_label: int) -> int | None:
@@ -615,6 +625,30 @@ class SlidingWindowIntentModel:
             if int(candidate_label) == int(raw_label):
                 return int(index)
         return None
+
+    def _select_prediction_index_with_nonzero_threshold(
+        self,
+        prediction_scores: np.ndarray,
+    ) -> int:
+        nonzero_indices = tuple(int(index) for index in self.metadata.nonzero_indices)
+        threshold = self.metadata.nonzero_prediction_threshold
+        if not nonzero_indices or threshold is None:
+            return int(np.argmax(prediction_scores))
+
+        for index in (self.metadata.zero_index, *nonzero_indices):
+            if not 0 <= int(index) < prediction_scores.shape[0]:
+                raise RuntimeError(
+                    "Prediction index %d is out of range for output width %d."
+                    % (int(index), prediction_scores.shape[0])
+                )
+
+        best_nonzero_index = max(
+            nonzero_indices,
+            key=lambda index: float(prediction_scores[int(index)]),
+        )
+        if float(prediction_scores[int(best_nonzero_index)]) >= float(threshold):
+            return int(best_nonzero_index)
+        return int(self.metadata.zero_index)
 
     def _select_prediction_index_with_label_thresholds(
         self,

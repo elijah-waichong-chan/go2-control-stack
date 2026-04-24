@@ -78,14 +78,50 @@ def _percentile99(samples: deque[float]) -> float:
     return float(ordered[min(idx, len(ordered) - 1)])
 
 
+def _load_score_smoothing_cfg(
+    deploy_cfg: dict[str, object],
+) -> tuple[str, float, int]:
+    """Load score smoothing config from the deploy YAML."""
+    inference_cfg = deploy_cfg.get("inference", {})
+    if not isinstance(inference_cfg, dict):
+        raise RuntimeError("deploy.yaml inference section must be a mapping.")
+
+    raw_smoothing_cfg = inference_cfg.get("score_smoothing", {})
+    if raw_smoothing_cfg is None:
+        raw_smoothing_cfg = {}
+    if not isinstance(raw_smoothing_cfg, dict):
+        raise RuntimeError("deploy.yaml inference.score_smoothing must be a mapping.")
+
+    method = str(raw_smoothing_cfg.get("method", "ema")).strip().lower() or "ema"
+    supported_methods = {"none", "ema", "moving_average"}
+    if method not in supported_methods:
+        raise RuntimeError(
+            "Unsupported inference.score_smoothing.method=%r. Supported values: %s."
+            % (method, ", ".join(sorted(supported_methods)))
+        )
+
+    ema_alpha = float(raw_smoothing_cfg.get("ema_alpha", 0.2))
+    if not 0.0 <= ema_alpha <= 1.0:
+        raise RuntimeError(
+            "deploy.yaml inference.score_smoothing.ema_alpha must be within [0, 1]."
+        )
+
+    moving_average_window = int(raw_smoothing_cfg.get("moving_average_window", 5))
+    if moving_average_window <= 0:
+        raise RuntimeError(
+            "deploy.yaml inference.score_smoothing.moving_average_window must be > 0."
+        )
+
+    return method, ema_alpha, moving_average_window
+
+
 class UpDownIntentEstimatorNode(Node):
     """Run the 056 model from the features declared in its deploy bundle."""
 
     STATUS_RUNNING = 1
     STATUS_WAITING_FOR_TOPICS = 2
-    TRANSITION_CONFIRMATIONS = 3
-    ZERO_TRANSITION_CONFIRMATIONS = 1
     SDK_TO_URDF_LEG_INDEX = (3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8)
+    MODEL_ARM_JOINT_INDICES = (1, 2, 4)
 
     def __init__(self) -> None:
         super().__init__("up_down_intent_estimator")
@@ -95,18 +131,20 @@ class UpDownIntentEstimatorNode(Node):
         self.model_dir = default_model_dir.expanduser()
         self.lowstate_topic = "/lowstate"
         self.arm_state_topic = "/arm/state"
-        self.output_topic = "/direction_intent/up_down"
-        self.raw_output_topic = "/direction_intent/up_down/raw"
+        self.output_topic = "/direction_intent/up_down/label"
         self.raw_scores_topic = "/direction_intent/up_down/scores_raw"
         self.smoothed_scores_topic = "/direction_intent/up_down/scores_smoothed"
         self.status_topic = "/status/intent_estimator/up_down"
         self.status_hz = 10.0
         self.publish_hz = 10.0
-        self.score_ema_alpha = float(self.declare_parameter("score_ema_alpha", 0.2).value)
-        self.score_ema_alpha = min(1.0, max(0.0, self.score_ema_alpha))
 
         deploy_cfg = load_deploy_cfg(resolve_deploy_path(self.model_dir))
         self.selected_features = load_selected_features(deploy_cfg)
+        (
+            self.score_smoothing_method,
+            self.score_ema_alpha,
+            self.score_moving_average_window,
+        ) = _load_score_smoothing_cfg(deploy_cfg)
         deploy_model_cfg = deploy_cfg.get("model", {})
         self.sampling_hz = float(deploy_model_cfg.get("sampling_hz", 200.0))
         self.sliding_window_ms = float(
@@ -142,6 +180,16 @@ class UpDownIntentEstimatorNode(Node):
         self.requires_arm_angles = bool(
             self.selected_feature_names.intersection({"arm_angles", "arm_currents"})
         )
+        self.model_arm_joint_indices = self.MODEL_ARM_JOINT_INDICES
+        expected_arm_width = len(self.model_arm_joint_indices)
+        for feature in self.selected_features:
+            if feature.name not in {"arm_angles", "arm_currents"}:
+                continue
+            if feature.width != expected_arm_width:
+                raise RuntimeError(
+                    "Deploy feature %r has width %d, but up/down arm wiring expects %d joints."
+                    % (feature.name, feature.width, expected_arm_width)
+                )
         self.input_topics: list[str] = []
         if self.requires_lowstate:
             self.input_topics.append(self.lowstate_topic)
@@ -149,15 +197,15 @@ class UpDownIntentEstimatorNode(Node):
             self.input_topics.append(self.arm_state_topic)
         self.have_lowstate = False
         self.have_arm_angles = False
-        self.latest_arm_angles: list[float] = [0.0] * 7
-        self.latest_arm_currents: list[float] = [0.0] * 7
+        self.latest_arm_angles: list[float] = [0.0] * expected_arm_width
+        self.latest_arm_currents: list[float] = [0.0] * expected_arm_width
         self.status_code = self.STATUS_WAITING_FOR_TOPICS
         self.waiting_on: str | None = None
         self.running_logged = False
-        self.filtered_label = 0
-        self.pending_label: int | None = None
-        self.pending_count = 0
         self.smoothed_prediction_scores: np.ndarray | None = None
+        self.recent_prediction_scores: deque[np.ndarray] = deque(
+            maxlen=self.score_moving_average_window
+        )
         self.label_order = [
             int(self.model.metadata.index_to_label[index])
             for index in sorted(self.model.metadata.index_to_label)
@@ -188,7 +236,6 @@ class UpDownIntentEstimatorNode(Node):
             self.sub_arm_angles = self.create_subscription(
                 ArmState, self.arm_state_topic, self.on_arm_angles, sensor_qos
             )
-        self.pub_raw_intent = self.create_publisher(Int32, self.raw_output_topic, 10)
         self.pub_raw_scores = self.create_publisher(
             Float32MultiArray, self.raw_scores_topic, 10
         )
@@ -205,13 +252,14 @@ class UpDownIntentEstimatorNode(Node):
         input_topics = " + ".join(self.input_topics) if self.input_topics else "(none)"
         self.get_logger().info(
             "up_down_intent_estimator ready: "
-            f"{input_topics} -> {self.raw_output_topic} (raw), {self.output_topic} (filtered), "
+            f"{input_topics} -> {self.output_topic}, "
             f"status={self.status_topic}, "
             f"model={self.model.metadata.model_path}, "
             f"window={self.sliding_window_ms:.0f}ms@{self.sampling_hz:.0f}Hz, "
             f"publish={self.publish_hz:.1f}Hz, "
-            f"score_ema_alpha={self.score_ema_alpha:.2f}, "
-            f"transition_confirmations={self.TRANSITION_CONFIRMATIONS}, "
+            f"score_smoothing={self.score_smoothing_method}, "
+            f"ema_alpha={self.score_ema_alpha:.2f}, "
+            f"moving_average_window={self.score_moving_average_window}, "
             f"raw_input={self.model.metadata.input_num_features}, "
             f"input={self.model.input_name}[batch,"
             f"{self.model.metadata.num_features},"
@@ -220,7 +268,8 @@ class UpDownIntentEstimatorNode(Node):
             f"labels={self.model.metadata.index_to_label}, "
             f"score_label_order={self.label_order}, "
             f"score_topics=[{self.raw_scores_topic}, {self.smoothed_scores_topic}], "
-            f"features={[feature.name for feature in self.selected_features]}"
+            f"features={[feature.name for feature in self.selected_features]}, "
+            f"arm_joint_wiring={self.model_arm_joint_indices}"
         )
 
     def _publish_scores(self, publisher, scores: np.ndarray) -> None:
@@ -230,6 +279,17 @@ class UpDownIntentEstimatorNode(Node):
 
     def _smooth_prediction_scores(self, raw_scores: np.ndarray) -> np.ndarray:
         raw_scores = np.asarray(raw_scores, dtype=np.float32).reshape(-1)
+        if self.score_smoothing_method == "none":
+            return raw_scores.copy()
+
+        if self.score_smoothing_method == "moving_average":
+            self.recent_prediction_scores.append(raw_scores.copy())
+            stacked_scores = np.stack(tuple(self.recent_prediction_scores), axis=0)
+            return np.mean(stacked_scores, axis=0, dtype=np.float32).astype(
+                np.float32,
+                copy=False,
+            )
+
         if self.smoothed_prediction_scores is None:
             self.smoothed_prediction_scores = raw_scores.copy()
             return self.smoothed_prediction_scores.copy()
@@ -241,49 +301,8 @@ class UpDownIntentEstimatorNode(Node):
         return self.smoothed_prediction_scores.copy()
 
     def _select_candidate_label(self, smoothed_scores: np.ndarray) -> int:
-        thresholds_by_label = self.model.metadata.label_confidence_thresholds
-        if not thresholds_by_label:
-            pred_index = int(np.argmax(smoothed_scores))
-            return int(self.model.metadata.index_to_label.get(pred_index, pred_index))
-
-        fallback_label = self.model.metadata.fallback_label
-        for index in np.argsort(smoothed_scores)[::-1]:
-            index = int(index)
-            label = int(self.model.metadata.index_to_label.get(index, index))
-            threshold = thresholds_by_label.get(label)
-            if threshold is None:
-                return label
-            if float(smoothed_scores[index]) >= float(threshold):
-                return label
-
-        if fallback_label is not None:
-            return int(fallback_label)
-        pred_index = int(np.argmax(smoothed_scores))
+        pred_index = self.model.select_prediction_index_from_scores(smoothed_scores)
         return int(self.model.metadata.index_to_label.get(pred_index, pred_index))
-
-    def _filter_transition(self, candidate_label: int) -> int:
-        candidate = int(candidate_label)
-        if candidate == self.filtered_label:
-            self.pending_label = None
-            self.pending_count = 0
-            return self.filtered_label
-
-        if candidate == self.pending_label:
-            self.pending_count += 1
-        else:
-            self.pending_label = candidate
-            self.pending_count = 1
-
-        required_confirmations = self.TRANSITION_CONFIRMATIONS
-        if candidate == 0 and self.filtered_label in (5, 6):
-            required_confirmations = self.ZERO_TRANSITION_CONFIRMATIONS
-
-        if self.pending_count >= required_confirmations:
-            self.filtered_label = candidate
-            self.pending_label = None
-            self.pending_count = 0
-
-        return self.filtered_label
 
     def _set_status(self, status_code: int) -> None:
         status_code = int(status_code)
@@ -378,8 +397,37 @@ class UpDownIntentEstimatorNode(Node):
         return source_vectors
 
     def on_arm_angles(self, msg: ArmState) -> None:
-        self.latest_arm_angles = [float(value) for value in msg.angle_deg]
-        self.latest_arm_currents = [float(value) for value in msg.current]
+        try:
+            required_joint_count = max(self.model_arm_joint_indices) + 1
+            if len(msg.angle_deg) < required_joint_count:
+                raise ValueError(
+                    "Expected /arm/state angle_deg to have length >= %d for joints %s, got %d"
+                    % (
+                        required_joint_count,
+                        self.model_arm_joint_indices,
+                        len(msg.angle_deg),
+                    )
+                )
+            if len(msg.current) < required_joint_count:
+                raise ValueError(
+                    "Expected /arm/state current to have length >= %d for joints %s, got %d"
+                    % (
+                        required_joint_count,
+                        self.model_arm_joint_indices,
+                        len(msg.current),
+                    )
+                )
+            self.latest_arm_angles = [
+                float(msg.angle_deg[joint_index])
+                for joint_index in self.model_arm_joint_indices
+            ]
+            self.latest_arm_currents = [
+                float(msg.current[joint_index])
+                for joint_index in self.model_arm_joint_indices
+            ]
+        except ValueError as exc:
+            self.get_logger().error(str(exc))
+            return
         self.have_arm_angles = True
         self._update_status()
         self._maybe_run_inference(None)
@@ -406,15 +454,18 @@ class UpDownIntentEstimatorNode(Node):
                     "Expected /lowstate motor_state to include at least "
                     f"{max_index + 1} entries, got {len(lowstate_msg.motor_state)}"
                 )
-            if self.requires_arm_angles and len(self.latest_arm_angles) != 7:
+            expected_arm_width = len(self.model_arm_joint_indices)
+            if self.requires_arm_angles and len(self.latest_arm_angles) != expected_arm_width:
                 raise ValueError(
-                    "Expected latest /arm/state angle_deg to have length 7, got "
-                    f"{len(self.latest_arm_angles)}"
+                    "Expected latest mapped /arm/state angle_deg to have length %d, got "
+                    % expected_arm_width
+                    + f"{len(self.latest_arm_angles)}"
                 )
-            if self.requires_arm_angles and len(self.latest_arm_currents) != 7:
+            if self.requires_arm_angles and len(self.latest_arm_currents) != expected_arm_width:
                 raise ValueError(
-                    "Expected latest /arm/state current to have length 7, got "
-                    f"{len(self.latest_arm_currents)}"
+                    "Expected latest mapped /arm/state current to have length %d, got "
+                    % expected_arm_width
+                    + f"{len(self.latest_arm_currents)}"
                 )
             if self._missing_topics():
                 return
@@ -443,13 +494,8 @@ class UpDownIntentEstimatorNode(Node):
         self._publish_scores(self.pub_raw_scores, raw_scores)
         self._publish_scores(self.pub_smoothed_scores, smoothed_scores)
 
-        raw_out = Int32()
-        raw_out.data = int(candidate_label)
-        self.pub_raw_intent.publish(raw_out)
-
-        filtered_label = self._filter_transition(int(candidate_label))
         out = Int32()
-        out.data = filtered_label
+        out.data = int(candidate_label)
         self.pub_intent.publish(out)
 
 

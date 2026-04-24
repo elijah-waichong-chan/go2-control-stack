@@ -1,6 +1,6 @@
 model:
   format: onnx
-  path: intent_left_right_gru_w500_e060_hpure_argmax_no_ff.onnx
+  path: intent_left_right_cnn_w500_e060_hpure_argmax_no_ff.onnx
   input_name: input
   output_name: logits
   opset_version: 18
@@ -11,10 +11,10 @@ model:
   sampling_hz: 200
   window_ms: 500
 architecture:
-  model_type: gru
-  gru_hidden_dim: 64
-  gru_num_layers: 1
-  gru_bidirectional: true
+  model_type: cnn
+  conv_channels: [32, 64, 128]
+  kernel_sizes: [7, 5, 3]
+  pool_after_layers: [1, 2]
   classifier_hidden_dim: 128
   dropout: 0.2
 features:

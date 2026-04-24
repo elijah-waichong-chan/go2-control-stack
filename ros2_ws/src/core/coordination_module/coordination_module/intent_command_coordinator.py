@@ -16,11 +16,13 @@ from rclpy.qos import (
     QoSReliabilityPolicy,
 )
 from std_msgs.msg import Int32
+from unitree_go.msg import WirelessController
 
 
 class IntentCommandCoordinator(Node):
     """Generate base commands and arm tasks from filtered transport intents."""
 
+    L1_BUTTON_MASK = 1 << 1
     FRONT_BACK_ARM_POSE = [90.0, -10.0, 10.0, -85.0, -3.0, -90.0]
     FRONT_BACK_PRESET_MASK = (1, 1, 1, 1, 1, 1)
     FRONT_BACK_MODE_RANGE_DEG = (-85.0, -105.0)
@@ -39,10 +41,11 @@ class IntentCommandCoordinator(Node):
     def __init__(self) -> None:
         super().__init__("intent_command_coordinator")
 
-        self.declare_parameter("forward_backward_intent_topic", "/direction_intent/front_back")
-        self.declare_parameter("left_right_intent_topic", "/direction_intent/left_right")
-        self.declare_parameter("up_down_intent_topic", "/direction_intent/up_down")
+        self.declare_parameter("forward_backward_intent_topic", "/direction_intent/front_back/label")
+        self.declare_parameter("left_right_intent_topic", "/direction_intent/left_right/label")
+        self.declare_parameter("up_down_intent_topic", "/direction_intent/up_down/label")
         self.declare_parameter("arm_state_topic", "/arm/state")
+        self.declare_parameter("wireless_topic", "/wirelesscontroller")
         self.declare_parameter("locomotion_cmd_topic", "/locomotion_cmd")
         self.declare_parameter("arm_task_topic", "/arm_task")
         self.declare_parameter("publish_hz", 50.0)
@@ -65,6 +68,7 @@ class IntentCommandCoordinator(Node):
         self.declare_parameter("right_y_vel", -0.3)
         self.declare_parameter("left_right_intent_timeout_s", 0.5)
         self.declare_parameter("up_down_intent_timeout_s", 0.5)
+        self.declare_parameter("wireless_timeout_s", 0.5)
 
         self.forward_backward_intent_topic = str(
             self.get_parameter("forward_backward_intent_topic").value
@@ -74,6 +78,7 @@ class IntentCommandCoordinator(Node):
         )
         self.up_down_intent_topic = str(self.get_parameter("up_down_intent_topic").value)
         self.arm_state_topic = str(self.get_parameter("arm_state_topic").value)
+        self.wireless_topic = str(self.get_parameter("wireless_topic").value)
         self.locomotion_cmd_topic = str(self.get_parameter("locomotion_cmd_topic").value)
         self.arm_task_topic = str(self.get_parameter("arm_task_topic").value)
         self.publish_hz = max(1.0, float(self.get_parameter("publish_hz").value))
@@ -105,6 +110,9 @@ class IntentCommandCoordinator(Node):
         self.up_down_intent_timeout_s = max(
             0.0, float(self.get_parameter("up_down_intent_timeout_s").value)
         )
+        self.wireless_timeout_s = max(
+            0.0, float(self.get_parameter("wireless_timeout_s").value)
+        )
 
         self.latest_forward_backward_intent: int | None = None
         self.last_forward_backward_intent_time_ns: int | None = None
@@ -121,11 +129,19 @@ class IntentCommandCoordinator(Node):
         self.active_arm_mode: str | None = None
         self.joint5_current_switch_latched = False
         self.next_mode_switch_time = 0.0
+        self.latest_wireless_keys = 0
+        self.last_wireless_time: float | None = None
 
         qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=10,
             reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.VOLATILE,
+        )
+        wireless_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
             durability=QoSDurabilityPolicy.VOLATILE,
         )
 
@@ -153,13 +169,19 @@ class IntentCommandCoordinator(Node):
             self.on_arm_state,
             qos,
         )
+        self.sub_wireless = self.create_subscription(
+            WirelessController,
+            self.wireless_topic,
+            self.on_wireless,
+            wireless_qos,
+        )
         self.pub_cmd = self.create_publisher(LocomotionCmd, self.locomotion_cmd_topic, qos)
         self.pub_arm_task = self.create_publisher(ArmTask, self.arm_task_topic, qos)
         self.timer = self.create_timer(1.0 / self.publish_hz, self.on_timer)
         self.get_logger().info(
             "intent_command_coordinator ready: "
             f"{self.forward_backward_intent_topic} + {self.left_right_intent_topic} + "
-            f"{self.up_down_intent_topic} + {self.arm_state_topic} -> "
+            f"{self.up_down_intent_topic} + {self.arm_state_topic} + {self.wireless_topic} -> "
             f"{self.locomotion_cmd_topic} + {self.arm_task_topic}, "
             f"publish={self.publish_hz:.1f}Hz"
         )
@@ -189,6 +211,17 @@ class IntentCommandCoordinator(Node):
             return
         self.latest_arm_angles_deg = [float(value) for value in msg.angle_deg[:6]]
         self.latest_arm_currents = [float(value) for value in msg.current[:6]]
+
+    def on_wireless(self, msg: WirelessController) -> None:
+        self.latest_wireless_keys = int(msg.keys) & 0xFFFF
+        self.last_wireless_time = time.monotonic()
+
+    def _is_l1_held(self) -> bool:
+        if self.last_wireless_time is None:
+            return False
+        if (time.monotonic() - self.last_wireless_time) > self.wireless_timeout_s:
+            return False
+        return bool(self.latest_wireless_keys & self.L1_BUTTON_MASK)
 
     def compute_y_vel(self) -> float:
         now_ns = self.get_clock().now().nanoseconds
@@ -410,7 +443,8 @@ class IntentCommandCoordinator(Node):
         locomotion_msg.y_vel = self.compute_y_vel()
         locomotion_msg.z_pos = self.z_pos
         locomotion_msg.yaw_rate = 0.0
-        self.pub_cmd.publish(locomotion_msg)
+        if not self._is_l1_held():
+            self.pub_cmd.publish(locomotion_msg)
 
         arm_task = self._compute_arm_task()
         if arm_task is not None:

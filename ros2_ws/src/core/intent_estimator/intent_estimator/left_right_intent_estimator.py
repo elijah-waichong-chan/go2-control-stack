@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 import time
 
+import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from hq_pcot_msgs.msg import LoopStatus
@@ -18,7 +19,7 @@ from rclpy.qos import (
     QoSProfile,
     QoSReliabilityPolicy,
 )
-from std_msgs.msg import Int32
+from std_msgs.msg import Float32MultiArray, Int32
 from unitree_go.msg import LowState
 
 from intent_estimator.onnx_runtime import (
@@ -72,12 +73,48 @@ def _percentile99(samples: deque[float]) -> float:
     return float(ordered[min(idx, len(ordered) - 1)])
 
 
+def _load_score_smoothing_cfg(
+    deploy_cfg: dict[str, object],
+) -> tuple[str, float, int]:
+    """Load score smoothing config from the deploy YAML."""
+    inference_cfg = deploy_cfg.get("inference", {})
+    if not isinstance(inference_cfg, dict):
+        raise RuntimeError("deploy.yaml inference section must be a mapping.")
+
+    raw_smoothing_cfg = inference_cfg.get("score_smoothing", {})
+    if raw_smoothing_cfg is None:
+        raw_smoothing_cfg = {}
+    if not isinstance(raw_smoothing_cfg, dict):
+        raise RuntimeError("deploy.yaml inference.score_smoothing must be a mapping.")
+
+    method = str(raw_smoothing_cfg.get("method", "ema")).strip().lower() or "ema"
+    supported_methods = {"none", "ema", "moving_average"}
+    if method not in supported_methods:
+        raise RuntimeError(
+            "Unsupported inference.score_smoothing.method=%r. Supported values: %s."
+            % (method, ", ".join(sorted(supported_methods)))
+        )
+
+    ema_alpha = float(raw_smoothing_cfg.get("ema_alpha", 0.2))
+    if not 0.0 <= ema_alpha <= 1.0:
+        raise RuntimeError(
+            "deploy.yaml inference.score_smoothing.ema_alpha must be within [0, 1]."
+        )
+
+    moving_average_window = int(raw_smoothing_cfg.get("moving_average_window", 5))
+    if moving_average_window <= 0:
+        raise RuntimeError(
+            "deploy.yaml inference.score_smoothing.moving_average_window must be > 0."
+        )
+
+    return method, ema_alpha, moving_average_window
+
+
 class LeftRightIntentEstimatorNode(Node):
     """Run the 034 model from deploy-configured LowState features."""
 
     STATUS_RUNNING = 1
     STATUS_WAITING_FOR_TOPICS = 2
-    TRANSITION_CONFIRMATIONS = 2
     SDK_TO_URDF_LEG_INDEX = (3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8)
 
     def __init__(self) -> None:
@@ -87,14 +124,20 @@ class LeftRightIntentEstimatorNode(Node):
 
         self.model_dir = default_model_dir.expanduser()
         self.lowstate_topic = "/lowstate"
-        self.output_topic = "/direction_intent/left_right"
-        self.raw_output_topic = "/direction_intent/left_right/raw"
+        self.output_topic = "/direction_intent/left_right/label"
+        self.raw_scores_topic = "/direction_intent/left_right/scores_raw"
+        self.smoothed_scores_topic = "/direction_intent/left_right/scores_smoothed"
         self.status_topic = "/status/intent_estimator/left_right"
         self.status_hz = 10.0
         self.publish_hz = 10.0
 
         deploy_cfg = load_deploy_cfg(resolve_deploy_path(self.model_dir))
         self.selected_features = load_selected_features(deploy_cfg)
+        (
+            self.score_smoothing_method,
+            self.score_ema_alpha,
+            self.score_moving_average_window,
+        ) = _load_score_smoothing_cfg(deploy_cfg)
         deploy_model_cfg = deploy_cfg.get("model", {})
         self.sampling_hz = float(deploy_model_cfg.get("sampling_hz", 200.0))
         self.sliding_window_ms = float(
@@ -129,9 +172,14 @@ class LeftRightIntentEstimatorNode(Node):
         self.status_code = self.STATUS_WAITING_FOR_TOPICS
         self.waiting_on: str | None = None
         self.running_logged = False
-        self.filtered_label = 0
-        self.pending_label: int | None = None
-        self.pending_count = 0
+        self.smoothed_prediction_scores: np.ndarray | None = None
+        self.recent_prediction_scores: deque[np.ndarray] = deque(
+            maxlen=self.score_moving_average_window
+        )
+        self.label_order = [
+            int(self.model.metadata.index_to_label[index])
+            for index in sorted(self.model.metadata.index_to_label)
+        ]
         self.loop_times_ms: deque[float] = deque(maxlen=self.loop_stats_window)
         self.deadline_flags: deque[int] = deque(maxlen=self.loop_stats_window)
         sensor_qos = QoSProfile(
@@ -150,48 +198,71 @@ class LeftRightIntentEstimatorNode(Node):
         self.sub_lowstate = self.create_subscription(
             LowState, self.lowstate_topic, self.on_lowstate, sensor_qos
         )
-        self.pub_raw_intent = self.create_publisher(Int32, self.raw_output_topic, 10)
+        self.pub_raw_scores = self.create_publisher(
+            Float32MultiArray, self.raw_scores_topic, 10
+        )
+        self.pub_smoothed_scores = self.create_publisher(
+            Float32MultiArray, self.smoothed_scores_topic, 10
+        )
         self.pub_intent = self.create_publisher(Int32, self.output_topic, 10)
         self.pub_status = self.create_publisher(LoopStatus, self.status_topic, status_qos)
-        self.status_timer = self.create_timer(1.0 / max(1.0, self.status_hz), self.on_status_timer)
+        self.status_timer = self.create_timer(
+            1.0 / max(1.0, self.status_hz), self.on_status_timer
+        )
         self._update_status()
 
         self.get_logger().info(
             "left_right_intent_estimator ready: "
-            f"{self.lowstate_topic} -> {self.raw_output_topic} (raw), {self.output_topic} (filtered), "
+            f"{self.lowstate_topic} -> {self.output_topic}, "
             f"status={self.status_topic}, "
             f"model={self.model.metadata.model_path}, "
             f"window={self.sliding_window_ms:.0f}ms@{self.sampling_hz:.0f}Hz, "
             f"publish={self.publish_hz:.1f}Hz, "
-            f"transition_confirmations={self.TRANSITION_CONFIRMATIONS}, "
+            f"score_smoothing={self.score_smoothing_method}, "
+            f"ema_alpha={self.score_ema_alpha:.2f}, "
+            f"moving_average_window={self.score_moving_average_window}, "
             f"raw_input={self.model.metadata.input_num_features}, "
             f"input={self.model.input_name}[batch,"
             f"{self.model.metadata.num_features},"
             f"{self.model.metadata.num_timesteps}], "
             f"output={self.model.output_name}[batch,{self.model.metadata.output_dim}], "
             f"labels={self.model.metadata.index_to_label}, "
+            f"score_label_order={self.label_order}, "
+            f"score_topics=[{self.raw_scores_topic}, {self.smoothed_scores_topic}], "
             f"features={[feature.name for feature in self.selected_features]}"
         )
 
-    def _filter_transition(self, candidate_label: int) -> int:
-        candidate = int(candidate_label)
-        if candidate == self.filtered_label:
-            self.pending_label = None
-            self.pending_count = 0
-            return self.filtered_label
+    def _publish_scores(self, publisher, scores: np.ndarray) -> None:
+        msg = Float32MultiArray()
+        msg.data = [float(value) for value in np.asarray(scores, dtype=np.float32).reshape(-1)]
+        publisher.publish(msg)
 
-        if candidate == self.pending_label:
-            self.pending_count += 1
-        else:
-            self.pending_label = candidate
-            self.pending_count = 1
+    def _smooth_prediction_scores(self, raw_scores: np.ndarray) -> np.ndarray:
+        raw_scores = np.asarray(raw_scores, dtype=np.float32).reshape(-1)
+        if self.score_smoothing_method == "none":
+            return raw_scores.copy()
 
-        if self.pending_count >= self.TRANSITION_CONFIRMATIONS:
-            self.filtered_label = candidate
-            self.pending_label = None
-            self.pending_count = 0
+        if self.score_smoothing_method == "moving_average":
+            self.recent_prediction_scores.append(raw_scores.copy())
+            stacked_scores = np.stack(tuple(self.recent_prediction_scores), axis=0)
+            return np.mean(stacked_scores, axis=0, dtype=np.float32).astype(
+                np.float32,
+                copy=False,
+            )
 
-        return self.filtered_label
+        if self.smoothed_prediction_scores is None:
+            self.smoothed_prediction_scores = raw_scores.copy()
+            return self.smoothed_prediction_scores.copy()
+
+        alpha = float(self.score_ema_alpha)
+        self.smoothed_prediction_scores = (
+            alpha * raw_scores + (1.0 - alpha) * self.smoothed_prediction_scores
+        ).astype(np.float32, copy=False)
+        return self.smoothed_prediction_scores.copy()
+
+    def _select_candidate_label(self, smoothed_scores: np.ndarray) -> int:
+        pred_index = self.model.select_prediction_index_from_scores(smoothed_scores)
+        return int(self.model.metadata.index_to_label.get(pred_index, pred_index))
 
     def _set_status(self, status_code: int) -> None:
         status_code = int(status_code)
@@ -297,7 +368,7 @@ class LeftRightIntentEstimatorNode(Node):
             self._update_status()
             source_vectors = self._build_source_vectors(msg)
             features = build_selected_feature_vector(self.selected_features, source_vectors)
-            pred_label = self.model.push(features, time.monotonic())
+            prediction = self.model.push_result(features, time.monotonic())
         except ValueError as exc:
             self.get_logger().error(str(exc))
             return
@@ -308,16 +379,18 @@ class LeftRightIntentEstimatorNode(Node):
             loop_time_ms = (time.perf_counter_ns() - start_ns) / 1e6
             self._record_loop_time_ms(loop_time_ms)
 
-        if pred_label is None:
+        if prediction is None:
             return
 
-        raw_out = Int32()
-        raw_out.data = int(pred_label)
-        self.pub_raw_intent.publish(raw_out)
+        raw_scores = np.asarray(prediction.prediction_scores, dtype=np.float32).reshape(-1)
+        smoothed_scores = self._smooth_prediction_scores(raw_scores)
+        candidate_label = self._select_candidate_label(smoothed_scores)
 
-        filtered_label = self._filter_transition(int(pred_label))
+        self._publish_scores(self.pub_raw_scores, raw_scores)
+        self._publish_scores(self.pub_smoothed_scores, smoothed_scores)
+
         out = Int32()
-        out.data = filtered_label
+        out.data = int(candidate_label)
         self.pub_intent.publish(out)
 
 

@@ -97,9 +97,9 @@ class TelemetryNode(Node):
             "arm_command_state": "/arm/commanded_angles",
             "arm_feedback": "/arm_Feedback",
             "arm_command": "/arm_Command",
-            "intent_forward_backward": "/direction_intent/front_back",
-            "intent_left_right": "/direction_intent/left_right",
-            "intent_up_down": "/direction_intent/up_down",
+            "intent_forward_backward": "/direction_intent/front_back/label",
+            "intent_left_right": "/direction_intent/left_right/label",
+            "intent_up_down": "/direction_intent/up_down/label",
         }
 
         self.create_subscription(QDq, self._topic_names["qdq_est"], self.on_qdq_est, qos)
@@ -1124,10 +1124,20 @@ def _render_sidebar(node: TelemetryNode) -> None:
         else "Start Rosbag Recording"
     )
     default_rosbag_topics = list(launch_process_manager.ROSBAG_TOPICS)
+    valid_rosbag_topics = set(default_rosbag_topics)
+    if "rosbag_topics" in st.session_state:
+        selected_default_rosbag_topics = [
+            topic
+            for topic in st.session_state["rosbag_topics"]
+            if topic in valid_rosbag_topics
+        ]
+        st.session_state["rosbag_topics"] = selected_default_rosbag_topics
+    else:
+        selected_default_rosbag_topics = default_rosbag_topics
     selected_rosbag_topics = st.multiselect(
         "Rosbag Topics",
         options=default_rosbag_topics,
-        default=st.session_state.get("rosbag_topics", default_rosbag_topics),
+        default=selected_default_rosbag_topics,
         key="rosbag_topics",
         disabled=rosbag_active,
         help="Choose which topics to record when starting rosbag. Defaults to all topics.",
@@ -1330,8 +1340,11 @@ def _render_dashboard(node: TelemetryNode) -> None:
             "</div>"
         )
     st.markdown("".join(group_blocks), unsafe_allow_html=True)
-    fb_topic_name = topic_names.get("intent_forward_backward", "/direction_intent/front_back")
-    lr_topic_name = topic_names.get("intent_left_right", "/direction_intent/left_right")
+    fb_topic_name = topic_names.get(
+        "intent_forward_backward", "/direction_intent/front_back/label"
+    )
+    lr_topic_name = topic_names.get("intent_left_right", "/direction_intent/left_right/label")
+    ud_topic_name = topic_names.get("intent_up_down", "/direction_intent/up_down/label")
     st.markdown(
         "<div class=\"intent-panels\">"
         + _render_front_back_intent_pad(
@@ -1349,16 +1362,11 @@ def _render_dashboard(node: TelemetryNode) -> None:
             lr_label=_parse_intent_label(topic_latest_msg.get("intent_left_right")),
         )
         + _render_up_down_intent_pad(
-            topic_name=topic_names.get("intent_up_down", "/direction_intent/up_down"),
+            topic_name=ud_topic_name,
             rate_hz=topic_rate.get("intent_up_down"),
-            available=bool(
-                topic_available.get(
-                    topic_names.get("intent_up_down", "/direction_intent/up_down"),
-                    False,
-                )
-            ),
+            available=bool(topic_available.get(ud_topic_name, False)),
             fresh=_topic_ok(
-                topic_names.get("intent_up_down", "/direction_intent/up_down"),
+                ud_topic_name,
                 "intent_up_down",
             ),
             label=_parse_intent_label(topic_latest_msg.get("intent_up_down")),

@@ -36,7 +36,7 @@ class ArmControllerNode(Node):
     UP_DOWN_TRACK_UPDATE_MASK = (0, 1, 1, 0, 1, 0)
     UP_DOWN_Z_VELOCITY_MPS = 0.1
     UP_DOWN_Z_REF_MIN_M = 0.20
-    UP_DOWN_Z_REF_MAX_M = 0.65
+    UP_DOWN_Z_REF_MAX_M = 0.50
 
     COMMAND_THRESHOLD_DEG = 0.1
     MOTION_SETTLE_DELAY_S = 2.0

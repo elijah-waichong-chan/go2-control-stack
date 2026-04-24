@@ -58,7 +58,7 @@ class FrontBackIntentEstimatorNode(Node):
         super().__init__("front_back_intent_estimator")
 
         self.arm_state_topic = "/arm/state"
-        self.output_topic = "/direction_intent/front_back"
+        self.output_topic = "/direction_intent/front_back/label"
         self.status_topic = "/status/intent_estimator/front_back"
         self.status_hz = 10.0
         self.expected_input_hz = 50.0
