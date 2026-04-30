@@ -907,12 +907,21 @@ def _render_sidebar(node: TelemetryNode) -> None:
         arm_controller_mode = "current_ik_ipopt"
     elif arm_controller_mode == "manual_control_ik":
         arm_controller_mode = "manual_control_ik_ipopt"
-    elif arm_controller_mode not in {"current_ik_ipopt", "manual_control_ik_ipopt"}:
+    elif arm_controller_mode not in {
+        "current_ik_ipopt",
+        "manual_control_ik_ipopt",
+        "pink_mode_switch",
+    }:
         arm_controller_mode = "current_ik_ipopt"
     arm_controller_mode_labels = {
-        "current_ik_ipopt": "Current IK (IPOPT)",
+        "current_ik_ipopt": "Legacy arm_controller",
         "manual_control_ik_ipopt": "Manual z-ref IK (IPOPT)",
+        "pink_mode_switch": "D1 Pink Mode Switch",
     }
+    arm_controller_mode_options = [
+        "current_ik_ipopt",
+        "pink_mode_switch",
+    ]
     enable_front_back_estimator = st.session_state.get(
         "ctrl_enable_front_back_estimator", True
     )
@@ -1107,10 +1116,10 @@ def _render_sidebar(node: TelemetryNode) -> None:
     with st.expander("Arm Controller Options", expanded=False):
         arm_controller_mode = st.selectbox(
             "Arm Controller Mode",
-            options=list(arm_controller_mode_labels.keys()),
-            index=list(arm_controller_mode_labels.keys()).index(
+            options=arm_controller_mode_options,
+            index=arm_controller_mode_options.index(
                 arm_controller_mode
-                if arm_controller_mode in arm_controller_mode_labels
+                if arm_controller_mode in arm_controller_mode_options
                 else "current_ik_ipopt"
             ),
             format_func=lambda value: arm_controller_mode_labels[value],

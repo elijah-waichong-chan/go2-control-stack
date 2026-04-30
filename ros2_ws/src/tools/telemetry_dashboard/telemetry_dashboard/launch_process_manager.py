@@ -15,8 +15,28 @@ _LOCK = threading.Lock()
 _PROCESSES: Dict[str, subprocess.Popen] = {}
 _ARM_FEEDBACK_PARSER_PROCESS = "arm_feedback_parser"
 _ARM_CONTROLLER_MODES = {
-    "current_ik_ipopt": ("arm_controller", "arm_controller"),
-    "manual_control_ik_ipopt": ("d1_z_ref_node", "d1_z_ref_node"),
+    "current_ik_ipopt": {
+        "process_name": "arm_controller",
+        "command": ["ros2", "run", "arm_controller", "arm_controller"],
+        "success_message": "started arm_controller arm_controller",
+    },
+    "manual_control_ik_ipopt": {
+        "process_name": "d1_z_ref_node",
+        "command": ["ros2", "run", "arm_controller", "d1_z_ref_node"],
+        "success_message": "started arm_controller d1_z_ref_node",
+    },
+    "pink_mode_switch": {
+        "process_name": "arm_pink_controller_mode_switch",
+        "command": [
+            "ros2",
+            "launch",
+            "arm_pink_controller",
+            "arm_pink_controller_mode_switch.launch.py",
+        ],
+        "success_message": (
+            "started arm_pink_controller arm_pink_controller_mode_switch.launch.py"
+        ),
+    },
 }
 _ARM_CONTROLLER_MODE_ALIASES = {
     "current_ik": "current_ik_ipopt",
@@ -262,20 +282,21 @@ def start_arm_controller_mode(mode: str) -> Tuple[bool, str]:
         if config is None:
             return False, f"unknown arm controller mode: {mode}"
 
-        process_name, executable = config
-        for other_name, _ in _ARM_CONTROLLER_MODES.values():
-            _cleanup_stale(other_name)
+        process_name = str(config["process_name"])
+        for other_config in _ARM_CONTROLLER_MODES.values():
+            _cleanup_stale(str(other_config["process_name"]))
         active_names = [
-            other_name for other_name, _ in _ARM_CONTROLLER_MODES.values()
-            if other_name in _PROCESSES
+            str(other_config["process_name"])
+            for other_config in _ARM_CONTROLLER_MODES.values()
+            if str(other_config["process_name"]) in _PROCESSES
         ]
         if active_names:
             return False, f"arm controller already running: {', '.join(active_names)}"
 
         return _start_process(
             process_name,
-            ["ros2", "run", "arm_controller", executable],
-            f"started arm_controller {executable}",
+            config["command"],
+            str(config["success_message"]),
         )
 
 
@@ -323,8 +344,8 @@ def stop_state_converter_stack() -> Tuple[bool, str]:
 def stop_arm_controller() -> Tuple[bool, str]:
     results: list[str] = []
     any_running = False
-    for process_name, _ in _ARM_CONTROLLER_MODES.values():
-        ok, msg = stop_launch(process_name)
+    for config in _ARM_CONTROLLER_MODES.values():
+        ok, msg = stop_launch(str(config["process_name"]))
         if ok:
             any_running = True
             results.append(msg)
@@ -336,7 +357,8 @@ def stop_arm_controller() -> Tuple[bool, str]:
 
 def get_active_arm_controller_mode() -> str | None:
     with _LOCK:
-        for mode, (process_name, _executable) in _ARM_CONTROLLER_MODES.items():
+        for mode, config in _ARM_CONTROLLER_MODES.items():
+            process_name = str(config["process_name"])
             _cleanup_stale(process_name)
             if process_name in _PROCESSES:
                 return mode
@@ -441,6 +463,7 @@ def stop_all() -> None:
         _ARM_FEEDBACK_PARSER_PROCESS,
         "arm_controller",
         "d1_z_ref_node",
+        "arm_pink_controller_mode_switch",
         "drake_arm_controller",
         "d1_z_reference_node",
         "d1_drake_z_ref_node",
