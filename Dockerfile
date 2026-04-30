@@ -47,7 +47,14 @@ RUN apt update && apt install -y \
 ENV PIP_DEFAULT_TIMEOUT=120 \
     PIP_RETRIES=10
 
-RUN python3 -m pip install --no-cache-dir --prefer-binary --ignore-installed streamlit onnxruntime==1.18.1 "numpy<2" casadi
+RUN python3 -m pip install --no-cache-dir --prefer-binary --ignore-installed \
+    streamlit \
+    onnxruntime==1.18.1 \
+    "numpy<2" \
+    casadi \
+    pin-pink \
+    qpsolvers \
+    osqp
 
 ENV ONNXRUNTIME_VERSION=1.18.1
 ENV ONNXRUNTIME_ROOT=/opt/onnxruntime

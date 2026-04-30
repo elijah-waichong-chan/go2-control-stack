@@ -11,7 +11,8 @@ import time
 import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from hq_pcot_msgs.msg import ArmState, LoopStatus
+from hq_pcot_msgs.msg import LoopStatus
+from icon_lab_d1_ros2.msg import ServoFeedback
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -130,7 +131,7 @@ class UpDownIntentEstimatorNode(Node):
 
         self.model_dir = default_model_dir.expanduser()
         self.lowstate_topic = "/lowstate"
-        self.arm_state_topic = "/arm/state"
+        self.arm_feedback_topic = "/arm/servo_feedback"
         self.output_topic = "/direction_intent/up_down/label"
         self.raw_scores_topic = "/direction_intent/up_down/scores_raw"
         self.smoothed_scores_topic = "/direction_intent/up_down/scores_smoothed"
@@ -194,7 +195,7 @@ class UpDownIntentEstimatorNode(Node):
         if self.requires_lowstate:
             self.input_topics.append(self.lowstate_topic)
         if self.requires_arm_angles:
-            self.input_topics.append(self.arm_state_topic)
+            self.input_topics.append(self.arm_feedback_topic)
         self.have_lowstate = False
         self.have_arm_angles = False
         self.latest_arm_angles: list[float] = [0.0] * expected_arm_width
@@ -231,10 +232,10 @@ class UpDownIntentEstimatorNode(Node):
             self.sub_lowstate = self.create_subscription(
                 LowState, self.lowstate_topic, self.on_lowstate, sensor_qos
             )
-        self.sub_arm_angles = None
+        self.sub_arm_feedback = None
         if self.requires_arm_angles:
-            self.sub_arm_angles = self.create_subscription(
-                ArmState, self.arm_state_topic, self.on_arm_angles, sensor_qos
+            self.sub_arm_feedback = self.create_subscription(
+                ServoFeedback, self.arm_feedback_topic, self.on_arm_feedback, sensor_qos
             )
         self.pub_raw_scores = self.create_publisher(
             Float32MultiArray, self.raw_scores_topic, 10
@@ -368,7 +369,7 @@ class UpDownIntentEstimatorNode(Node):
         if self.requires_lowstate and not self.have_lowstate:
             missing_topics.append(self.lowstate_topic)
         if self.requires_arm_angles and not self.have_arm_angles:
-            missing_topics.append(self.arm_state_topic)
+            missing_topics.append(self.arm_feedback_topic)
         return missing_topics
 
     def _build_source_vectors(self, lowstate_msg: LowState | None) -> dict[str, object]:
@@ -396,25 +397,25 @@ class UpDownIntentEstimatorNode(Node):
             raise ValueError(f"Unsupported up_down deploy feature: {feature.name}")
         return source_vectors
 
-    def on_arm_angles(self, msg: ArmState) -> None:
+    def on_arm_feedback(self, msg: ServoFeedback) -> None:
         try:
             required_joint_count = max(self.model_arm_joint_indices) + 1
             if len(msg.angle_deg) < required_joint_count:
                 raise ValueError(
-                    "Expected /arm/state angle_deg to have length >= %d for joints %s, got %d"
+                    "Expected /arm/servo_feedback angle_deg to have length >= %d for joints %s, got %d"
                     % (
                         required_joint_count,
                         self.model_arm_joint_indices,
                         len(msg.angle_deg),
                     )
                 )
-            if len(msg.current) < required_joint_count:
+            if len(msg.current_ma) < required_joint_count:
                 raise ValueError(
-                    "Expected /arm/state current to have length >= %d for joints %s, got %d"
+                    "Expected /arm/servo_feedback current_ma to have length >= %d for joints %s, got %d"
                     % (
                         required_joint_count,
                         self.model_arm_joint_indices,
-                        len(msg.current),
+                        len(msg.current_ma),
                     )
                 )
             self.latest_arm_angles = [
@@ -422,7 +423,7 @@ class UpDownIntentEstimatorNode(Node):
                 for joint_index in self.model_arm_joint_indices
             ]
             self.latest_arm_currents = [
-                float(msg.current[joint_index])
+                float(msg.current_ma[joint_index])
                 for joint_index in self.model_arm_joint_indices
             ]
         except ValueError as exc:
@@ -457,13 +458,13 @@ class UpDownIntentEstimatorNode(Node):
             expected_arm_width = len(self.model_arm_joint_indices)
             if self.requires_arm_angles and len(self.latest_arm_angles) != expected_arm_width:
                 raise ValueError(
-                    "Expected latest mapped /arm/state angle_deg to have length %d, got "
+                    "Expected latest mapped /arm/servo_feedback angle_deg to have length %d, got "
                     % expected_arm_width
                     + f"{len(self.latest_arm_angles)}"
                 )
             if self.requires_arm_angles and len(self.latest_arm_currents) != expected_arm_width:
                 raise ValueError(
-                    "Expected latest mapped /arm/state current to have length %d, got "
+                    "Expected latest mapped /arm/servo_feedback current_ma to have length %d, got "
                     % expected_arm_width
                     + f"{len(self.latest_arm_currents)}"
                 )
