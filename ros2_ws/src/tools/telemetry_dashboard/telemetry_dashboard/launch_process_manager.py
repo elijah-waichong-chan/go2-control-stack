@@ -13,18 +13,7 @@ from typing import Dict, Sequence, Tuple
 
 _LOCK = threading.Lock()
 _PROCESSES: Dict[str, subprocess.Popen] = {}
-_ARM_FEEDBACK_PARSER_PROCESS = "arm_feedback_parser"
 _ARM_CONTROLLER_MODES = {
-    "current_ik_ipopt": {
-        "process_name": "arm_controller",
-        "command": ["ros2", "run", "arm_controller", "arm_controller"],
-        "success_message": "started arm_controller arm_controller",
-    },
-    "manual_control_ik_ipopt": {
-        "process_name": "d1_z_ref_node",
-        "command": ["ros2", "run", "arm_controller", "d1_z_ref_node"],
-        "success_message": "started arm_controller d1_z_ref_node",
-    },
     "pink_mode_switch": {
         "process_name": "arm_pink_controller_mode_switch",
         "command": [
@@ -38,17 +27,12 @@ _ARM_CONTROLLER_MODES = {
         ),
     },
 }
-_ARM_CONTROLLER_MODE_ALIASES = {
-    "current_ik": "current_ik_ipopt",
-    "manual_control_ik": "manual_control_ik_ipopt",
-}
 ROSBAG_TOPICS: tuple[str, ...] = (
     "/data/push_event",
     "/lowstate",
     "/lowcmd",
     "/arm_task",
     "/arm/z_reference",
-    "/arm/state",
     "/arm/commanded_angles",
     "/arm/servo_feedback",
     "/arm/servo_command",
@@ -222,11 +206,7 @@ def start_rosbag_recording(selected_topics: Sequence[str] | None = None) -> Tupl
 def start_state_converter_stack() -> Tuple[bool, str]:
     with _LOCK:
         _cleanup_stale("state_converter_stack")
-        _cleanup_stale(_ARM_FEEDBACK_PARSER_PROCESS)
-        if (
-            "state_converter_stack" in _PROCESSES
-            or _ARM_FEEDBACK_PARSER_PROCESS in _PROCESSES
-        ):
+        if "state_converter_stack" in _PROCESSES:
             return False, "state converter stack already running"
 
         started_names: list[str] = []
@@ -239,15 +219,6 @@ def start_state_converter_stack() -> Tuple[bool, str]:
             if not ok:
                 return False, msg
             started_names.append("state_converter_stack")
-
-            ok, msg = _start_process(
-                _ARM_FEEDBACK_PARSER_PROCESS,
-                ["ros2", "run", "arm_controller", "arm_feedback_parser"],
-                "started arm_controller arm_feedback_parser",
-            )
-            if not ok:
-                raise RuntimeError(msg)
-            started_names.append(_ARM_FEEDBACK_PARSER_PROCESS)
         except Exception as exc:
             for name in reversed(started_names):
                 proc = _PROCESSES.get(name)
@@ -268,16 +239,15 @@ def start_state_converter_stack() -> Tuple[bool, str]:
                 _PROCESSES.pop(name, None)
             return False, f"failed to start state converter stack: {exc}"
 
-        return True, "started state converter node and arm feedback parser"
+        return True, "started state converter stack"
 
 
 def start_arm_controller() -> Tuple[bool, str]:
-    return start_arm_controller_mode("current_ik_ipopt")
+    return start_arm_controller_mode("pink_mode_switch")
 
 
 def start_arm_controller_mode(mode: str) -> Tuple[bool, str]:
     with _LOCK:
-        mode = _ARM_CONTROLLER_MODE_ALIASES.get(mode, mode)
         config = _ARM_CONTROLLER_MODES.get(mode)
         if config is None:
             return False, f"unknown arm controller mode: {mode}"
@@ -330,7 +300,7 @@ def stop_launch(name: str) -> Tuple[bool, str]:
 def stop_state_converter_stack() -> Tuple[bool, str]:
     results: list[str] = []
     any_running = False
-    for name in ("state_converter_stack", _ARM_FEEDBACK_PARSER_PROCESS):
+    for name in ("state_converter_stack",):
         ok, msg = stop_launch(name)
         if ok:
             any_running = True
@@ -460,12 +430,6 @@ def stop_all() -> None:
         "foxglove_bridge",
         "rosbag_recording",
         "state_converter_stack",
-        _ARM_FEEDBACK_PARSER_PROCESS,
-        "arm_controller",
-        "d1_z_ref_node",
         "arm_pink_controller_mode_switch",
-        "drake_arm_controller",
-        "d1_z_reference_node",
-        "d1_drake_z_ref_node",
     ):
         stop_launch(name)

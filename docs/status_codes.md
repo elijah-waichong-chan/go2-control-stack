@@ -52,15 +52,6 @@ Source: `go2_odometry/scripts/inekf_odom.py`
 - `1`: running
 - `2`: waiting for `/status/standing_init` readiness
 
-### `/status/arm_parser`
-
-Message type: `go2_msgs/LoopStatus`
-
-Source: `arm_controller/arm_feedback_parser.py`
-
-- `1`: publishing parsed arm angles
-- `2`: waiting for arm feedback input
-
 ### `/status/intent_estimator/left_right`
 
 Message type: `go2_msgs/LoopStatus`

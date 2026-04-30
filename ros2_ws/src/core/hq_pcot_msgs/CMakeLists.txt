@@ -17,7 +17,6 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/QDq.msg"
   "msg/LocomotionCmd.msg"
-  "msg/ArmState.msg"
   "msg/ArmCommand.msg"
   "msg/ArmTask.msg"
   "msg/PushEvent.msg"

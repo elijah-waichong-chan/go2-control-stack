@@ -7,7 +7,8 @@ from collections import deque
 import time
 
 import rclpy
-from hq_pcot_msgs.msg import ArmState, ArmTask, LocomotionCmd
+from hq_pcot_msgs.msg import ArmTask, LocomotionCmd
+from icon_lab_d1_ros2.msg import ServoFeedback
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -44,7 +45,7 @@ class IntentCommandCoordinator(Node):
         self.declare_parameter("forward_backward_intent_topic", "/direction_intent/front_back/label")
         self.declare_parameter("left_right_intent_topic", "/direction_intent/left_right/label")
         self.declare_parameter("up_down_intent_topic", "/direction_intent/up_down/label")
-        self.declare_parameter("arm_state_topic", "/arm/state")
+        self.declare_parameter("arm_feedback_topic", "/arm/servo_feedback")
         self.declare_parameter("wireless_topic", "/wirelesscontroller")
         self.declare_parameter("locomotion_cmd_topic", "/locomotion_cmd")
         self.declare_parameter("arm_task_topic", "/arm_task")
@@ -77,7 +78,7 @@ class IntentCommandCoordinator(Node):
             self.get_parameter("left_right_intent_topic").value
         )
         self.up_down_intent_topic = str(self.get_parameter("up_down_intent_topic").value)
-        self.arm_state_topic = str(self.get_parameter("arm_state_topic").value)
+        self.arm_feedback_topic = str(self.get_parameter("arm_feedback_topic").value)
         self.wireless_topic = str(self.get_parameter("wireless_topic").value)
         self.locomotion_cmd_topic = str(self.get_parameter("locomotion_cmd_topic").value)
         self.arm_task_topic = str(self.get_parameter("arm_task_topic").value)
@@ -163,10 +164,10 @@ class IntentCommandCoordinator(Node):
             self.on_up_down_intent,
             qos,
         )
-        self.sub_arm_state = self.create_subscription(
-            ArmState,
-            self.arm_state_topic,
-            self.on_arm_state,
+        self.sub_arm_feedback = self.create_subscription(
+            ServoFeedback,
+            self.arm_feedback_topic,
+            self.on_arm_feedback,
             qos,
         )
         self.sub_wireless = self.create_subscription(
@@ -181,7 +182,7 @@ class IntentCommandCoordinator(Node):
         self.get_logger().info(
             "intent_command_coordinator ready: "
             f"{self.forward_backward_intent_topic} + {self.left_right_intent_topic} + "
-            f"{self.up_down_intent_topic} + {self.arm_state_topic} + {self.wireless_topic} -> "
+            f"{self.up_down_intent_topic} + {self.arm_feedback_topic} + {self.wireless_topic} -> "
             f"{self.locomotion_cmd_topic} + {self.arm_task_topic}, "
             f"publish={self.publish_hz:.1f}Hz"
         )
@@ -206,11 +207,11 @@ class IntentCommandCoordinator(Node):
         self.latest_up_down_intent = int(msg.data)
         self.last_up_down_intent_time = time.monotonic()
 
-    def on_arm_state(self, msg: ArmState) -> None:
+    def on_arm_feedback(self, msg: ServoFeedback) -> None:
         if len(msg.angle_deg) < 6:
             return
         self.latest_arm_angles_deg = [float(value) for value in msg.angle_deg[:6]]
-        self.latest_arm_currents = [float(value) for value in msg.current[:6]]
+        self.latest_arm_currents = [float(value) for value in msg.current_ma[:6]]
 
     def on_wireless(self, msg: WirelessController) -> None:
         self.latest_wireless_keys = int(msg.keys) & 0xFFFF

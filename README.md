@@ -10,7 +10,7 @@ The stack includes:
 
 - a Streamlit telemetry dashboard
 - reinforcement-learning based Unitree Go2 locomotion
-- Unitree D1 arm feedback parsing and arm-control utilities
+- Unitree D1 arm ROS/UDP bridge and Pink-based arm-control utilities
 - intent estimation nodes backed by ONNX models
 - robot description and vendor dependencies as submodules
 
@@ -138,7 +138,8 @@ export LD_LIBRARY_PATH="$ONNXRUNTIME_ROOT/lib:${LD_LIBRARY_PATH}"
 
 | Package | Description |
 | --- | --- |
-| `arm_controller` | Arm feedback parsing, arm-control nodes, and D1 reference generation utilities. |
+| `arm_pink_controller` | Pink-based D1 arm controller and mode-switch utilities. |
+| `icon_lab_d1_ros2` | ROS/UDP bridge for D1 servo feedback and command transport. |
 | `coordination_module` | Coordination logic built around HQ-PCOT custom messages. |
 | `estimator_bridge` | Converts estimator outputs into the formats consumed elsewhere in the stack. |
 | `go2_odometry` | Go2 odometry and InEKF-based state-estimation package. |

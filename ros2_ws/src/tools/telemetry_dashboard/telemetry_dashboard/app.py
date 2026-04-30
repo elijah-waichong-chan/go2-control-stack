@@ -9,10 +9,11 @@ from typing import Deque, Dict, Tuple
 import streamlit as st
 
 import rclpy
+from icon_lab_d1_ros2.msg import ServoFeedback
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 
-from hq_pcot_msgs.msg import ArmCommand, ArmState, LocomotionCmd, LoopStatus, QDq
+from hq_pcot_msgs.msg import ArmCommand, LocomotionCmd, LoopStatus, QDq
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Int32
@@ -93,7 +94,7 @@ class TelemetryNode(Node):
             "lowcmd": "/lowcmd",
             "joint_states": "/joint_states",
             "tf": "/tf",
-            "arm_state": "/arm/state",
+            "arm_servo_feedback": "/arm/servo_feedback",
             "arm_command_state": "/arm/commanded_angles",
             "arm_feedback": "/arm_Feedback",
             "arm_command": "/arm_Command",
@@ -118,7 +119,12 @@ class TelemetryNode(Node):
         self.create_subscription(
             TFMessage, self._topic_names["tf"], self.on_tf, qos
         )
-        self.create_subscription(ArmState, self._topic_names["arm_state"], self.on_arm_angles, qos)
+        self.create_subscription(
+            ServoFeedback,
+            self._topic_names["arm_servo_feedback"],
+            self.on_arm_servo_feedback,
+            qos,
+        )
         self.create_subscription(
             ArmCommand,
             self._topic_names["arm_command_state"],
@@ -160,12 +166,6 @@ class TelemetryNode(Node):
             LoopStatus,
             "/status/loco_ctrl",
             lambda m: self.on_loop_status("loco_ctrl", m),
-            status_qos,
-        )
-        self.create_subscription(
-            LoopStatus,
-            "/status/arm_parser",
-            lambda m: self.on_loop_status("arm_parser", m),
             status_qos,
         )
         self.create_subscription(
@@ -239,8 +239,8 @@ class TelemetryNode(Node):
     def on_tf(self, msg: TFMessage) -> None:
         self._mark_topic("tf")
 
-    def on_arm_angles(self, msg: ArmState) -> None:
-        self._mark_topic("arm_state")
+    def on_arm_servo_feedback(self, msg: ServoFeedback) -> None:
+        self._mark_topic("arm_servo_feedback")
 
     def on_arm_command_state(self, msg: ArmCommand) -> None:
         self._mark_topic("arm_command_state")
@@ -527,16 +527,6 @@ def _module_summary(key: str, value: object) -> tuple[str, str]:
             return "info", "running sequence"
         return "error", f"idle ({standing_status})"
 
-    if key == "arm_parser":
-        arm_parser_status = _status_code(value)
-        if arm_parser_status is None:
-            return "error", "invalid status"
-        if arm_parser_status == 1:
-            return "success", "publishing"
-        if arm_parser_status == 2:
-            return "warning", "waiting for /arm_Feedback"
-        return "error", f"idle ({arm_parser_status})"
-
     if key == "rl_controller":
         loco_status = _status_code(value)
         if loco_status is None:
@@ -609,7 +599,6 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
         ("standing_init", "Standing Init"),
         ("rl_controller", "RL Controller"),
         ("intent_estimator", "Intent Estimator"),
-        ("arm_parser", "Arm Parser"),
     ]
 
     intent_estimator_value, intent_estimator_topic = _get_intent_estimator_status(
@@ -618,13 +607,11 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
 
     status_view = {
         "standing_init": _get_fresh_status(status_map, "standing_init", now, timeout),
-        "arm_parser": _get_fresh_status(status_map, "arm_parser", now, timeout),
         "rl_controller": _get_fresh_status(status_map, "loco_ctrl", now, timeout),
         "intent_estimator": intent_estimator_value,
     }
     status_topics = {
         "standing_init": "/status/standing_init",
-        "arm_parser": "/status/arm_parser",
         "rl_controller": "/status/loco_ctrl",
         "intent_estimator": (
             intent_estimator_topic
@@ -891,7 +878,6 @@ def _render_sidebar(node: TelemetryNode) -> None:
     ]
     state_converter_active = (
         launch_process_manager.is_running("state_converter_stack")
-        or launch_process_manager.is_running("arm_feedback_parser")
     )
     arm_controller_active = launch_process_manager.is_arm_controller_running()
     active_arm_controller_mode = launch_process_manager.get_active_arm_controller_mode()
@@ -899,29 +885,9 @@ def _render_sidebar(node: TelemetryNode) -> None:
         "Stop Locomotion" if locomotion_active else "Start Locomotion"
     )
     enable_wireless_cmd_bridge = st.session_state.get("ctrl_enable_wireless_cmd_bridge", True)
-    arm_controller_mode = st.session_state.get(
-        "arm_controller_mode",
-        "current_ik_ipopt",
-    )
-    if arm_controller_mode == "current_ik":
-        arm_controller_mode = "current_ik_ipopt"
-    elif arm_controller_mode == "manual_control_ik":
-        arm_controller_mode = "manual_control_ik_ipopt"
-    elif arm_controller_mode not in {
-        "current_ik_ipopt",
-        "manual_control_ik_ipopt",
-        "pink_mode_switch",
-    }:
-        arm_controller_mode = "current_ik_ipopt"
     arm_controller_mode_labels = {
-        "current_ik_ipopt": "Legacy arm_controller",
-        "manual_control_ik_ipopt": "Manual z-ref IK (IPOPT)",
         "pink_mode_switch": "D1 Pink Mode Switch",
     }
-    arm_controller_mode_options = [
-        "current_ik_ipopt",
-        "pink_mode_switch",
-    ]
     enable_front_back_estimator = st.session_state.get(
         "ctrl_enable_front_back_estimator", True
     )
@@ -1106,30 +1072,16 @@ def _render_sidebar(node: TelemetryNode) -> None:
         if arm_controller_active:
             ok, msg = launch_process_manager.stop_arm_controller()
         else:
-            ok, msg = launch_process_manager.start_arm_controller_mode(
-                arm_controller_mode
-            )
+            ok, msg = launch_process_manager.start_arm_controller_mode("pink_mode_switch")
         if ok:
             st.info(msg)
         else:
             st.warning(msg)
-    with st.expander("Arm Controller Options", expanded=False):
-        arm_controller_mode = st.selectbox(
-            "Arm Controller Mode",
-            options=arm_controller_mode_options,
-            index=arm_controller_mode_options.index(
-                arm_controller_mode
-                if arm_controller_mode in arm_controller_mode_options
-                else "current_ik_ipopt"
-            ),
-            format_func=lambda value: arm_controller_mode_labels[value],
-            key="arm_controller_mode",
+    if active_arm_controller_mode in arm_controller_mode_labels:
+        st.caption(
+            "Active arm controller: "
+            + arm_controller_mode_labels[active_arm_controller_mode]
         )
-        if active_arm_controller_mode in arm_controller_mode_labels:
-            st.caption(
-                "Active arm controller: "
-                + arm_controller_mode_labels[active_arm_controller_mode]
-            )
     foxglove_label = (
         "Stop Foxglove Bridge"
         if foxglove_active
@@ -1256,7 +1208,7 @@ def _render_dashboard(node: TelemetryNode) -> None:
             "Arm",
             [
                 ("arm_feedback", "arm_feedback"),
-                ("arm_state", "arm_state"),
+                ("arm_servo_feedback", "arm_servo_feedback"),
                 ("arm_command_state", "arm_command_state"),
                 ("arm_command", "arm_command"),
             ],

@@ -8,7 +8,8 @@ import math
 import time
 
 import rclpy
-from hq_pcot_msgs.msg import ArmState, LoopStatus
+from hq_pcot_msgs.msg import LoopStatus
+from icon_lab_d1_ros2.msg import ServoFeedback
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -57,7 +58,7 @@ class FrontBackIntentEstimatorNode(Node):
     def __init__(self) -> None:
         super().__init__("front_back_intent_estimator")
 
-        self.arm_state_topic = "/arm/state"
+        self.arm_feedback_topic = "/arm/servo_feedback"
         self.output_topic = "/direction_intent/front_back/label"
         self.status_topic = "/status/intent_estimator/front_back"
         self.status_hz = 10.0
@@ -95,8 +96,8 @@ class FrontBackIntentEstimatorNode(Node):
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
 
-        self.sub_arm_angles = self.create_subscription(
-            ArmState, self.arm_state_topic, self.on_arm_angles, sensor_qos
+        self.sub_arm_feedback = self.create_subscription(
+            ServoFeedback, self.arm_feedback_topic, self.on_arm_feedback, sensor_qos
         )
         self.pub_intent = self.create_publisher(Int32, self.output_topic, 10)
         self.pub_status = self.create_publisher(LoopStatus, self.status_topic, status_qos)
@@ -107,7 +108,7 @@ class FrontBackIntentEstimatorNode(Node):
 
         self.get_logger().info(
             "front_back_intent_estimator ready: "
-            f"{self.arm_state_topic} -> {self.output_topic}, "
+            f"{self.arm_feedback_topic} -> {self.output_topic}, "
             f"status={self.status_topic}, "
             f"forward=[{self.forward_min_deg:.1f}, {self.forward_max_deg:.1f}]deg -> {self.forward_label}, "
             f"backward=[{self.backward_min_deg:.1f}, {self.backward_max_deg:.1f}]deg -> {self.backward_label}, "
@@ -178,11 +179,11 @@ class FrontBackIntentEstimatorNode(Node):
 
     def _update_status(self) -> None:
         if not self.have_arm_angles:
-            if self.waiting_on != self.arm_state_topic:
+            if self.waiting_on != self.arm_feedback_topic:
                 self.get_logger().info(
-                    f"front_back_intent_estimator waiting for {self.arm_state_topic}..."
+                    f"front_back_intent_estimator waiting for {self.arm_feedback_topic}..."
                 )
-                self.waiting_on = self.arm_state_topic
+                self.waiting_on = self.arm_feedback_topic
             self._set_status(self.STATUS_WAITING_FOR_TOPICS)
             return
 
@@ -199,12 +200,12 @@ class FrontBackIntentEstimatorNode(Node):
             return self.backward_label
         return self.idle_label
 
-    def on_arm_angles(self, msg: ArmState) -> None:
+    def on_arm_feedback(self, msg: ServoFeedback) -> None:
         """Publish heuristic front/back intent labels from the first arm joint."""
         start_ns = time.perf_counter_ns()
         try:
             if len(msg.angle_deg) == 0:
-                raise ValueError("Expected /arm/state to include at least one angle.")
+                raise ValueError("Expected /arm/servo_feedback to include at least one angle.")
             self.have_arm_angles = True
             self._update_status()
             pred_label = self._predict_label(float(msg.angle_deg[0]))
