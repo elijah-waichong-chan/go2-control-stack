@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import psutil
+import re
 import signal
 import subprocess
 import threading
@@ -29,6 +30,8 @@ ROSBAG_TOPICS: tuple[str, ...] = (
     "/arm/z_reference",
     "/arm/state",
     "/arm/commanded_angles",
+    "/arm/servo_feedback",
+    "/arm/servo_command",
     "/direction_intent/front_back/label",
     "/direction_intent/left_right/label",
     "/direction_intent/left_right/scores_raw",
@@ -36,14 +39,14 @@ ROSBAG_TOPICS: tuple[str, ...] = (
     "/direction_intent/up_down/label",
     "/direction_intent/up_down/scores_raw",
     "/direction_intent/up_down/scores_smoothed",
-    "/status/intent_estimator/front_back",
-    "/status/intent_estimator/left_right",
-    "/status/intent_estimator/up_down",
     "/locomotion_cmd",
     "/joint_states",
     "/robot_description",
     "/tf",
     "/tf_static",
+)
+FOXGLOVE_TOPICS: tuple[str, ...] = (
+    "/lowstate",
 )
 
 
@@ -130,6 +133,20 @@ def start_launch(
             command,
             f"started {package} {launch_file}",
         )
+
+
+def start_foxglove_bridge(selected_topics: Sequence[str] | None = None) -> Tuple[bool, str]:
+    topics = list(selected_topics) if selected_topics is not None else list(FOXGLOVE_TOPICS)
+    if not topics:
+        return False, "select at least one Foxglove topic"
+
+    topic_whitelist = "[" + ",".join(f'"^{re.escape(topic)}$"' for topic in topics) + "]"
+    return start_launch(
+        "foxglove_bridge",
+        "foxglove_bridge",
+        "foxglove_bridge_launch.xml",
+        launch_args={"topic_whitelist": topic_whitelist},
+    )
 
 
 def start_node(
@@ -417,6 +434,7 @@ def stop_all() -> None:
         "front_back_estimator",
         "left_right_estimator",
         "up_down_estimator",
+        "icon_lab_d1_ros2",
         "foxglove_bridge",
         "rosbag_recording",
         "state_converter_stack",

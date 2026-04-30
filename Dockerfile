@@ -56,3 +56,25 @@ ENV LD_LIBRARY_PATH=${ONNXRUNTIME_ROOT}/lib:${LD_LIBRARY_PATH}
 RUN mkdir -p ${ONNXRUNTIME_ROOT} && \
     curl -L https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}.tgz \
     | tar -xz -C ${ONNXRUNTIME_ROOT} --strip-components=1
+
+ENV UNITREE_SDK2_REPO=https://github.com/unitreerobotics/unitree_sdk2.git \
+    UNITREE_SDK2_REF=main \
+    UNITREE_SDK2_ROOT=/opt/unitree_robotics
+
+RUN apt update && apt install -y \
+    build-essential \
+    cmake \
+    libboost-all-dev \
+    libeigen3-dev \
+    libfmt-dev \
+    libspdlog-dev \
+    libyaml-cpp-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 --branch ${UNITREE_SDK2_REF} ${UNITREE_SDK2_REPO} /tmp/unitree_sdk2 && \
+    cmake -S /tmp/unitree_sdk2 -B /tmp/unitree_sdk2/build -DCMAKE_INSTALL_PREFIX=${UNITREE_SDK2_ROOT} && \
+    cmake --build /tmp/unitree_sdk2/build -j"$(nproc)" && \
+    cmake --install /tmp/unitree_sdk2/build && \
+    rm -rf /tmp/unitree_sdk2
+
+ENV LD_LIBRARY_PATH=${UNITREE_SDK2_ROOT}/lib:${LD_LIBRARY_PATH}

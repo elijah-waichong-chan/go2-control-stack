@@ -881,6 +881,7 @@ def _render_sidebar(node: TelemetryNode) -> None:
         or launch_process_manager.is_running("control_stack")
     )
     autonomy_active = launch_process_manager.is_running("autonomy")
+    icon_lab_d1_active = launch_process_manager.is_running("icon_lab_d1_ros2")
     foxglove_active = launch_process_manager.is_running("foxglove_bridge")
     rosbag_active = launch_process_manager.is_running("rosbag_recording")
     active_intent_estimator_modes = [
@@ -970,6 +971,29 @@ def _render_sidebar(node: TelemetryNode) -> None:
                 "autonomy",
                 "coordination_module",
                 "intent_command_coordinator",
+            )
+        if ok:
+            st.info(msg)
+        else:
+            st.warning(msg)
+    icon_lab_d1_label = (
+        "Stop Icon Lab D1 ROS2"
+        if icon_lab_d1_active
+        else "Start Icon Lab D1 ROS2"
+    )
+    if st.button(
+        icon_lab_d1_label,
+        key="toggle_icon_lab_d1_ros2",
+        use_container_width=True,
+        type="primary" if icon_lab_d1_active else "secondary",
+    ):
+        if icon_lab_d1_active:
+            ok, msg = launch_process_manager.stop_launch("icon_lab_d1_ros2")
+        else:
+            ok, msg = launch_process_manager.start_launch(
+                "icon_lab_d1_ros2",
+                "icon_lab_d1_ros2",
+                "icon_lab_d1_ros2.launch.py",
             )
         if ok:
             st.info(msg)
@@ -1111,9 +1135,7 @@ def _render_sidebar(node: TelemetryNode) -> None:
         if foxglove_active:
             ok, msg = launch_process_manager.stop_launch("foxglove_bridge")
         else:
-            ok, msg = launch_process_manager.start_launch(
-                "foxglove_bridge", "foxglove_bridge", "foxglove_bridge_launch.xml"
-            )
+            ok, msg = launch_process_manager.start_foxglove_bridge()
         if ok:
             st.info(msg)
         else:
