@@ -14,7 +14,6 @@ setup(
         (
             "share/" + package_name + "/launch",
             [
-                "launch/arm_pink_controller.launch.py",
                 "launch/arm_pink_controller_mode_switch.launch.py",
             ],
         ),

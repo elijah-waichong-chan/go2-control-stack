@@ -20,5 +20,5 @@ This package no longer provides a GUI. Another node is expected to publish
 Example:
 
 ```bash
-ros2 launch arm_pink_controller arm_pink_controller.launch.py
+ros2 launch arm_pink_controller arm_pink_controller_mode_switch.launch.py
 ```
