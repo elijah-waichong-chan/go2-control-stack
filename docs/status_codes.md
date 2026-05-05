@@ -80,6 +80,16 @@ Source: `arm_pink_controller/d1_pink_mode_switch_controller.py`
 - `2`: waiting for fresh `/arm/servo_feedback`
 - `3`: startup sequence active
 
+### `/status/arm_z_ref_controller`
+
+Message type: `hq_pcot_msgs/LoopStatus`
+
+Source: `arm_pink_controller/d1_pink_z_ref_controller.py`
+
+- `1`: running
+- `2`: waiting for fresh `/arm/servo_feedback`
+- `3`: startup sequence active
+
 ### `/status/coordination_module`
 
 Message type: `hq_pcot_msgs/LoopStatus`

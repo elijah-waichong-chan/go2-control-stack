@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+from collections import deque
 import math
+import time
 
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import (
+    QoSDurabilityPolicy,
+    QoSHistoryPolicy,
+    QoSProfile,
+    QoSReliabilityPolicy,
+)
 from std_msgs.msg import Bool, Float32
 
+from hq_pcot_msgs.msg import LoopStatus
 from icon_lab_d1_ros2.msg import ServoCommand, ServoFeedback
 
 from arm_pink_controller.pink_solver import D1PinkSolver, PinkUnavailableError
@@ -16,7 +25,38 @@ SERVO_COUNT = 7
 ARM_JOINT_COUNT = 6
 
 
+def _make_loop_status(
+    status_code: int,
+    avg_loop_ms: float = -1.0,
+    p99_loop_ms: float = -1.0,
+    max_loop_ms: float = -1.0,
+    budget_ms: float = -1.0,
+    deadline_miss_count: int = -1,
+    sample_count: int = -1,
+) -> LoopStatus:
+    msg = LoopStatus()
+    msg.status = int(status_code)
+    msg.avg_loop_ms = float(avg_loop_ms)
+    msg.p99_loop_ms = float(p99_loop_ms)
+    msg.max_loop_ms = float(max_loop_ms)
+    msg.budget_ms = float(budget_ms)
+    msg.deadline_miss_count = int(deadline_miss_count)
+    msg.sample_count = int(sample_count)
+    return msg
+
+
+def _percentile99(samples: deque[float]) -> float:
+    if not samples:
+        return -1.0
+    ordered = sorted(samples)
+    idx = max(0, math.ceil(0.99 * len(ordered)) - 1)
+    return float(ordered[min(idx, len(ordered) - 1)])
+
+
 class D1PinkZRefController(Node):
+    STATUS_RUNNING = 1
+    STATUS_WAITING_FOR_TOPICS = 2
+    STATUS_STARTUP = 3
     STARTUP_HOME_DEG = np.array([90.0, -10.0, 10.0, 0.0, -3.0, 90.0], dtype=float)
     STARTUP_VELOCITY_DEG_S = 80.0
     POSITION_TOLERANCE_DEG = 2.0
@@ -34,6 +74,8 @@ class D1PinkZRefController(Node):
         self.declare_parameter("solver_current_z_topic", "/d1_pink/solver_current_z")
         self.declare_parameter("enabled_topic", "/d1_pink/enabled")
         self.declare_parameter("startup_complete_topic", "/d1_pink/startup_complete")
+        self.declare_parameter("status_topic", "/status/arm_z_ref_controller")
+        self.declare_parameter("status_hz", 10.0)
         self.declare_parameter("control_rate_hz", 20.0)
         self.declare_parameter("z_ref_min_m", -0.09)
         self.declare_parameter("z_ref_max_m", 0.50)
@@ -54,6 +96,8 @@ class D1PinkZRefController(Node):
         solver_current_z_topic = self.get_parameter("solver_current_z_topic").value
         enabled_topic = self.get_parameter("enabled_topic").value
         startup_complete_topic = self.get_parameter("startup_complete_topic").value
+        self.status_topic = self.get_parameter("status_topic").value
+        self.status_hz = max(1.0, float(self.get_parameter("status_hz").value))
         self.control_rate_hz = float(self.get_parameter("control_rate_hz").value)
         self.tracking_command_interval_ms = max(1, int(round(1000.0 / self.control_rate_hz)))
         z_ref_min_m = float(self.get_parameter("z_ref_min_m").value)
@@ -74,6 +118,10 @@ class D1PinkZRefController(Node):
             raise ValueError("position_tolerance_deg must be > 0")
         if self.tracking_command_deadband_deg < 0.0:
             raise ValueError("tracking_command_deadband_deg must be >= 0")
+        if self.control_rate_hz <= 0.0:
+            raise ValueError("control_rate_hz must be > 0")
+        self.loop_budget_ms = 1000.0 / max(self.control_rate_hz, 1.0)
+        self.loop_stats_window = max(100, int(self.control_rate_hz * 10.0))
 
         try:
             self.solver = D1PinkSolver(z_ref_min_m=z_ref_min_m, z_ref_max_m=z_ref_max_m)
@@ -94,6 +142,13 @@ class D1PinkZRefController(Node):
         self.solver_target_z_pub = self.create_publisher(Float32, solver_target_z_topic, 10)
         self.solver_current_z_pub = self.create_publisher(Float32, solver_current_z_topic, 10)
         self.startup_complete_pub = self.create_publisher(Bool, startup_complete_topic, 10)
+        status_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.status_pub = self.create_publisher(LoopStatus, self.status_topic, status_qos)
 
         self.latest_servo_feedback_deg: np.ndarray | None = None
         self.desired_z_reference_m: float | None = None
@@ -102,7 +157,15 @@ class D1PinkZRefController(Node):
         self.startup_home_command_sent = False
         self.startup_complete = False
         self.last_tracking_command_deg: np.ndarray | None = None
+        self.last_control_time_sec: float | None = None
+        self.status_code = self.STATUS_WAITING_FOR_TOPICS
+        self.waiting_on: str | None = None
+        self.running_logged = False
+        self.loop_times_ms: deque[float] = deque(maxlen=self.loop_stats_window)
+        self.deadline_flags: deque[int] = deque(maxlen=self.loop_stats_window)
         self.timer = self.create_timer(1.0 / self.control_rate_hz, self._on_timer)
+        self.status_timer = self.create_timer(1.0 / self.status_hz, self._on_status_timer)
+        self._update_status()
 
         self.get_logger().info(
             f"Pink z_ref controller running on {feedback_topic} -> {command_topic} "
@@ -116,8 +179,69 @@ class D1PinkZRefController(Node):
             f"defer startup until enabled={self.defer_startup_until_enabled}; "
             f"tracking deadband {self.tracking_command_deadband_deg:.2f} deg; "
             f"IK enable topic {enabled_topic}; "
-            f"startup complete topic {startup_complete_topic}"
+            f"startup complete topic {startup_complete_topic}; "
+            f"status topic {self.status_topic}"
         )
+
+    def _set_status(self, status_code: int) -> None:
+        status_code = int(status_code)
+        if status_code == self.status_code:
+            return
+        self.status_code = status_code
+        self._publish_status()
+
+    def _record_loop_time_ms(self, loop_time_ms: float) -> None:
+        self.loop_times_ms.append(float(loop_time_ms))
+        self.deadline_flags.append(1 if loop_time_ms > self.loop_budget_ms else 0)
+
+    def _publish_status(self) -> None:
+        if not self.loop_times_ms:
+            self.status_pub.publish(
+                _make_loop_status(
+                    self.status_code,
+                    budget_ms=self.loop_budget_ms,
+                )
+            )
+            return
+
+        max_loop_ms = max(self.loop_times_ms)
+        avg_loop_ms = sum(self.loop_times_ms) / len(self.loop_times_ms)
+        p99_loop_ms = _percentile99(self.loop_times_ms)
+        deadline_miss_count = sum(self.deadline_flags)
+        sample_count = len(self.loop_times_ms)
+        self.status_pub.publish(
+            _make_loop_status(
+                self.status_code,
+                avg_loop_ms=avg_loop_ms,
+                p99_loop_ms=p99_loop_ms,
+                max_loop_ms=max_loop_ms,
+                budget_ms=self.loop_budget_ms,
+                deadline_miss_count=deadline_miss_count,
+                sample_count=sample_count,
+            )
+        )
+
+    def _on_status_timer(self) -> None:
+        self._publish_status()
+
+    def _update_status(self) -> None:
+        if self.latest_servo_feedback_deg is None:
+            if self.waiting_on != "feedback":
+                self.get_logger().info("d1_pink_z_ref_controller waiting for /arm/servo_feedback...")
+                self.waiting_on = "feedback"
+            self._set_status(self.STATUS_WAITING_FOR_TOPICS)
+            return
+
+        if not self.startup_complete:
+            self.waiting_on = None
+            self._set_status(self.STATUS_STARTUP)
+            return
+
+        self.waiting_on = None
+        self._set_status(self.STATUS_RUNNING)
+        if not self.running_logged:
+            self.get_logger().info("d1_pink_z_ref_controller running")
+            self.running_logged = True
 
     def _startup_target_reached(self) -> bool:
         if self.latest_servo_feedback_deg is None:
@@ -204,8 +328,17 @@ class D1PinkZRefController(Node):
         return bool(np.any(delta_deg >= self.tracking_command_deadband_deg))
 
     def _on_timer(self) -> None:
+        loop_start = time.perf_counter()
         if self.latest_servo_feedback_deg is None:
+            self._update_status()
             return
+
+        now_sec = self.get_clock().now().nanoseconds * 1e-9
+        if self.last_control_time_sec is None:
+            dt = 1.0 / self.control_rate_hz
+        else:
+            dt = max(1e-3, now_sec - self.last_control_time_sec)
+        self.last_control_time_sec = now_sec
 
         current_model_q = self.solver.servo_to_model(self.latest_servo_feedback_deg)
         current_z = self.solver.get_current_z(current_model_q)
@@ -214,9 +347,12 @@ class D1PinkZRefController(Node):
         self._publish_startup_complete()
         self._publish_z_ref()
         self._publish_solver_target_z()
+        self._update_status()
 
         if self.defer_startup_until_enabled:
             if not self.ik_enabled:
+                self._update_status()
+                self._record_loop_time_ms((time.perf_counter() - loop_start) * 1000.0)
                 return
 
             if not self.startup_complete:
@@ -232,6 +368,8 @@ class D1PinkZRefController(Node):
                     "Initialized Pink z_ref after external enable; "
                     f"reseeded q0 from current pose (nominal z={seeded_z:.4f} m) and kept z_ref={self.desired_z_reference_m:.4f} m"
                 )
+                self._update_status()
+                self._record_loop_time_ms((time.perf_counter() - loop_start) * 1000.0)
                 return
 
         if not self.startup_home_command_sent:
@@ -241,10 +379,14 @@ class D1PinkZRefController(Node):
                 "Publishing startup home pose in velocity mode and waiting until "
                 f"all joints are within {self.position_tolerance_deg:.1f} deg"
             )
+            self._update_status()
+            self._record_loop_time_ms((time.perf_counter() - loop_start) * 1000.0)
             return
 
         if not self.startup_complete:
             if not self._startup_target_reached():
+                self._update_status()
+                self._record_loop_time_ms((time.perf_counter() - loop_start) * 1000.0)
                 return
 
             settled_model_q = self.solver.servo_to_model(self.latest_servo_feedback_deg)
@@ -260,15 +402,18 @@ class D1PinkZRefController(Node):
                 "Startup settle complete. Seeded q0 from settled pose, "
                 f"nominal z={settled_z:.4f} m, synced z_ref={self.desired_z_reference_m:.4f} m, and auto-enabled Pink IK"
             )
+            self._update_status()
+            self._record_loop_time_ms((time.perf_counter() - loop_start) * 1000.0)
             return
 
         if not self.ik_enabled:
+            self._update_status()
+            self._record_loop_time_ms((time.perf_counter() - loop_start) * 1000.0)
             return
 
         if self.desired_z_reference_m is None:
             self.desired_z_reference_m = current_z
 
-        dt = 1.0 / self.control_rate_hz
         if abs(self.manual_z_velocity_mps) > 0.0:
             self.desired_z_reference_m = float(
                 np.clip(
@@ -288,6 +433,7 @@ class D1PinkZRefController(Node):
             )
         except Exception as exc:  # pragma: no cover
             self.get_logger().error(f"Pink solve failed: {exc}")
+            self._record_loop_time_ms((time.perf_counter() - loop_start) * 1000.0)
             return
 
         self._publish_current_z(result.current_z_m)
@@ -296,8 +442,11 @@ class D1PinkZRefController(Node):
             result.joint_command_deg, self.latest_servo_feedback_deg
         )
         if not np.all(np.isfinite(servo_targets[:ARM_JOINT_COUNT])):
+            self._record_loop_time_ms((time.perf_counter() - loop_start) * 1000.0)
             return
         if not self._tracking_command_changed(servo_targets):
+            self._update_status()
+            self._record_loop_time_ms((time.perf_counter() - loop_start) * 1000.0)
             return
 
         command = ServoCommand()
@@ -311,6 +460,8 @@ class D1PinkZRefController(Node):
         command.interval_ms = self.tracking_command_interval_ms
         self.command_pub.publish(command)
         self.last_tracking_command_deg = servo_targets.copy()
+        self._update_status()
+        self._record_loop_time_ms((time.perf_counter() - loop_start) * 1000.0)
 
 
 def main() -> None:

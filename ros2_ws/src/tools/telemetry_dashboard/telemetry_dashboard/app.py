@@ -266,6 +266,12 @@ class TelemetryNode(Node):
         )
         self.create_subscription(
             LoopStatus,
+            "/status/arm_z_ref_controller",
+            lambda m: self.on_loop_status("arm_z_ref_controller", m),
+            status_qos,
+        )
+        self.create_subscription(
+            LoopStatus,
             "/status/coordination_module",
             lambda m: self.on_loop_status("coordination_module", m),
             status_qos,
@@ -666,7 +672,8 @@ def _get_arm_controller_status(
 ) -> Dict[str, object]:
     return {
         "controller_running": launch_process_manager.is_arm_controller_running(),
-        "status_value": _get_fresh_status(status_map, "arm_controller", now, timeout),
+        "mode_switch_status_value": _get_fresh_status(status_map, "arm_controller", now, timeout),
+        "z_ref_status_value": _get_fresh_status(status_map, "arm_z_ref_controller", now, timeout),
     }
 
 
@@ -780,13 +787,15 @@ def _module_summary(key: str, value: object) -> tuple[str, str]:
         if not isinstance(value, dict):
             return "error", "not running"
         controller_running = bool(value.get("controller_running"))
-        status_value = value.get("status_value")
-        status_code = _status_code(status_value)
-        if controller_running and status_code == 1:
+        mode_switch_status = value.get("mode_switch_status_value")
+        z_ref_status = value.get("z_ref_status_value")
+        mode_switch_code = _status_code(mode_switch_status)
+        z_ref_code = _status_code(z_ref_status)
+        if controller_running and mode_switch_code == 1 and z_ref_code == 1:
             return "success", "running"
-        if controller_running and status_code == 3:
+        if controller_running and (mode_switch_code == 3 or z_ref_code == 3):
             return "info", "startup sequence"
-        if controller_running and status_code == 2:
+        if controller_running and (mode_switch_code == 2 or z_ref_code == 2):
             return "warning", "waiting for /arm/servo_feedback"
         if controller_running:
             return "warning", "starting"
@@ -875,7 +884,7 @@ def _render_state_converter_details(value: object) -> None:
 
 
 def _render_arm_controller_details(value: object) -> None:
-    st.caption("Process and status topic")
+    st.caption("Process and both controller status topics")
     if not isinstance(value, dict):
         st.caption("No process status available.")
         return
@@ -883,7 +892,14 @@ def _render_arm_controller_details(value: object) -> None:
     st.write(
         f"Arm Controller: `{'running' if value.get('controller_running') else 'stopped'}`"
     )
-    _render_loop_status_details("/status/arm_controller", value.get("status_value"))
+    st.write("Mode Switch Controller")
+    _render_loop_status_details(
+        "/status/arm_controller", value.get("mode_switch_status_value")
+    )
+    st.write("Z Ref Controller")
+    _render_loop_status_details(
+        "/status/arm_z_ref_controller", value.get("z_ref_status_value")
+    )
 
 
 def _render_coordination_module_details(value: object) -> None:
