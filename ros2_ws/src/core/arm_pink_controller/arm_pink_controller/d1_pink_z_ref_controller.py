@@ -79,7 +79,6 @@ class D1PinkZRefController(Node):
         self.declare_parameter("control_rate_hz", 20.0)
         self.declare_parameter("z_ref_min_m", 0.15)
         self.declare_parameter("z_ref_max_m", 0.50)
-        self.declare_parameter("max_abs_z_velocity_mps", 0.20)
         self.declare_parameter("startup_velocity_deg_s", self.STARTUP_VELOCITY_DEG_S)
         self.declare_parameter("position_tolerance_deg", self.POSITION_TOLERANCE_DEG)
         self.declare_parameter("defer_startup_until_enabled", False)
@@ -102,7 +101,6 @@ class D1PinkZRefController(Node):
         self.tracking_command_interval_ms = max(1, int(round(1000.0 / self.control_rate_hz)))
         z_ref_min_m = float(self.get_parameter("z_ref_min_m").value)
         z_ref_max_m = float(self.get_parameter("z_ref_max_m").value)
-        self.max_abs_z_velocity_mps = float(self.get_parameter("max_abs_z_velocity_mps").value)
         self.startup_velocity_deg_s = float(self.get_parameter("startup_velocity_deg_s").value)
         self.position_tolerance_deg = float(self.get_parameter("position_tolerance_deg").value)
         self.defer_startup_until_enabled = bool(
@@ -262,9 +260,7 @@ class D1PinkZRefController(Node):
         self._publish_current_z(current_z)
 
     def _handle_z_velocity(self, msg: Float32) -> None:
-        self.manual_z_velocity_mps = float(
-            np.clip(msg.data, -self.max_abs_z_velocity_mps, self.max_abs_z_velocity_mps)
-        )
+        self.manual_z_velocity_mps = float(msg.data)
 
     def _handle_enabled(self, msg: Bool) -> None:
         enabled = bool(msg.data)

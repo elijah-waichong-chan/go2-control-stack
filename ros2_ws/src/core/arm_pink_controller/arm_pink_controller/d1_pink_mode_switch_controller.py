@@ -74,7 +74,7 @@ class D1PinkModeSwitchController(Node):
     DEFAULT_FRONT_BACK_JOINT0_COMMAND_VELOCITY_DEG_S = 50.0
     DEFAULT_FRONT_BACK_JOINT0_RETURN_TARGET_DEG = 90.0
     DEFAULT_JOINT0_DAMPING_POWER_MW = 0.0
-    DEFAULT_UP_DOWN_Z_COMMAND_VELOCITY_MPS = 0.1
+    DEFAULT_UP_DOWN_Z_COMMAND_VELOCITY_MPS = 0.2
 
     def __init__(self) -> None:
         super().__init__("d1_pink_mode_switch_controller")
