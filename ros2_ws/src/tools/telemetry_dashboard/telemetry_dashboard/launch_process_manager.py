@@ -56,6 +56,7 @@ ROSBAG_TOPICS: tuple[str, ...] = (
     "/arm/z_reference",
     "/arm/commanded_angles",
     "/arm/servo_feedback",
+    "/arm/servo_command_input",
     "/arm/servo_command",
     "/direction_intent/front_back/label",
     "/direction_intent/left_right/label",
@@ -73,6 +74,7 @@ ROSBAG_TOPICS: tuple[str, ...] = (
 FOXGLOVE_TOPICS: tuple[str, ...] = (
     "/lowstate",
     "/arm_task",
+    "/arm/servo_command_input",
     "/d1_pink/current_z",
     "/d1_pink/solver_current_z",
     "/d1_pink/solver_target_z",

@@ -1442,6 +1442,7 @@ def _rosbag_topic_groups(default_topics: list[str]) -> Dict[str, list[str]]:
             "/arm/z_reference",
             "/arm/commanded_angles",
             "/arm/servo_feedback",
+            "/arm/servo_command_input",
             "/arm/servo_command",
             "/d1_pink/current_z",
             "/d1_pink/solver_current_z",
