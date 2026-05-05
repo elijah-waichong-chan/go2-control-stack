@@ -1,0 +1,50 @@
+model:
+  format: onnx
+  path: intent_up_down.onnx
+  input_name: input
+  output_name: logits
+  opset_version: 18
+  input_layout: NCT
+  dynamic_batch: true
+  num_features: 12
+  num_timesteps: 4
+features:
+  selected:
+  - name: arm_angles
+    source_start: 31
+    source_end: 38
+    width: 3
+    joint_indices: [1, 2, 4]
+    source_indices: [32, 33, 35]
+  - name: arm_currents
+    source_start: 38
+    source_end: 45
+    width: 3
+    joint_indices: [1, 2, 4]
+    source_indices: [39, 40, 42]
+  - name: arm_velocities
+    source_start: 45
+    source_end: 52
+    width: 3
+    joint_indices: [1, 2, 4]
+    source_indices: [46, 47, 49]
+  - name: last_action
+    source_start: 52
+    source_end: 59
+    width: 3
+    joint_indices: [1, 2, 4]
+    source_indices: [53, 54, 56]
+labels:
+  raw_label_set: [0, 5, 6]
+  label_to_index:
+    0: 0
+    5: 1
+    6: 2
+  index_to_label:
+    0: 0
+    1: 5
+    2: 6
+preprocessing:
+  normalize: true
+  x_mean: [1.0847020149230957, 33.16244888305664, -33.59381866455078, 23.457189559936523, 115.76432037353516, 96.75335693359375, -0.019966771826148033, -0.23615646362304688, 0.06626547127962112, 0.8569892644882202, 32.9381103515625, -33.89503479003906]
+  x_std: [9.43199348449707, 28.31070899963379, 36.79311752319336, 60.04903030395508, 200.98385620117188, 119.68477630615234, 3.602125883102417, 7.569252014160156, 9.36015510559082, 9.473016738891602, 28.38579750061035, 36.79047775268555]
