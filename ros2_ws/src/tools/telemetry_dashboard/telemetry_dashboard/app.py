@@ -18,7 +18,6 @@ from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Int32
 from tf2_msgs.msg import TFMessage
 from unitree_go.msg import LowCmd, LowState
-from unitree_arm.msg import ArmString
 from telemetry_dashboard import launch_process_manager
 
 
@@ -93,8 +92,6 @@ class TelemetryNode(Node):
             "tf": "/tf",
             "arm_servo_feedback": "/arm/servo_feedback",
             "arm_command_state": "/arm/commanded_angles",
-            "arm_feedback": "/arm_Feedback",
-            "arm_command": "/arm_Command",
             "intent_forward_backward": "/direction_intent/front_back/label",
             "intent_left_right": "/direction_intent/left_right/label",
             "intent_up_down": "/direction_intent/up_down/label",
@@ -123,12 +120,6 @@ class TelemetryNode(Node):
             self._topic_names["arm_command_state"],
             self.on_arm_command_state,
             qos,
-        )
-        self.create_subscription(
-            ArmString, self._topic_names["arm_feedback"], self.on_arm_feedback, qos
-        )
-        self.create_subscription(
-            ArmString, self._topic_names["arm_command"], self.on_arm_command, qos
         )
         self.create_subscription(
             Int32,
@@ -225,12 +216,6 @@ class TelemetryNode(Node):
 
     def on_arm_command_state(self, msg: ArmCommand) -> None:
         self._mark_topic("arm_command_state")
-
-    def on_arm_feedback(self, msg: ArmString) -> None:
-        self._mark_topic("arm_feedback")
-
-    def on_arm_command(self, msg: ArmString) -> None:
-        self._mark_topic("arm_command")
 
     def _mark_topic(self, key: str) -> None:
         with self._lock:
@@ -1309,10 +1294,8 @@ def _render_dashboard(node: TelemetryNode) -> None:
         (
             "Arm",
             [
-                ("arm_feedback", "arm_feedback"),
                 ("arm_servo_feedback", "arm_servo_feedback"),
                 ("arm_command_state", "arm_command_state"),
-                ("arm_command", "arm_command"),
             ],
         ),
         (
