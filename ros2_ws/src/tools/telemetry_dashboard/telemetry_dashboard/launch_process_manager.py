@@ -44,6 +44,13 @@ ROSBAG_TOPICS: tuple[str, ...] = (
     "/lowstate",
     "/lowcmd",
     "/arm_task",
+    "/d1_pink/current_z",
+    "/d1_pink/enabled",
+    "/d1_pink/mode",
+    "/d1_pink/mode_switch_startup_complete",
+    "/d1_pink/startup_complete",
+    "/d1_pink/z_ref",
+    "/d1_pink/z_velocity",
     "/arm/z_reference",
     "/arm/commanded_angles",
     "/arm/servo_feedback",
@@ -63,6 +70,15 @@ ROSBAG_TOPICS: tuple[str, ...] = (
 )
 FOXGLOVE_TOPICS: tuple[str, ...] = (
     "/lowstate",
+    "/arm_task",
+    "/d1_pink/current_z",
+    "/d1_pink/enabled",
+    "/d1_pink/mode",
+    "/d1_pink/mode_switch_startup_complete",
+    "/d1_pink/startup_complete",
+    "/d1_pink/z_ref",
+    "/d1_pink/z_velocity",
+    "/locomotion_cmd",
 )
 
 

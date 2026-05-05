@@ -20,7 +20,7 @@ from rclpy.qos import (
 
 from hq_pcot_msgs.msg import ArmCommand, ArmTask, LocomotionCmd, LoopStatus
 from sensor_msgs.msg import Imu, JointState
-from std_msgs.msg import Int32
+from std_msgs.msg import Bool, Float32, Int32, String
 from tf2_msgs.msg import TFMessage
 from unitree_go.msg import LowCmd, LowState
 from telemetry_dashboard import launch_process_manager
@@ -103,6 +103,13 @@ class TelemetryNode(Node):
             "arm_servo_command": "/arm/servo_command",
             "arm_command_state": "/arm/commanded_angles",
             "arm_task": "/arm_task",
+            "d1_pink_current_z": "/d1_pink/current_z",
+            "d1_pink_enabled": "/d1_pink/enabled",
+            "d1_pink_mode": "/d1_pink/mode",
+            "d1_pink_mode_switch_startup_complete": "/d1_pink/mode_switch_startup_complete",
+            "d1_pink_startup_complete": "/d1_pink/startup_complete",
+            "d1_pink_z_ref": "/d1_pink/z_ref",
+            "d1_pink_z_velocity": "/d1_pink/z_velocity",
             "intent_forward_backward": "/direction_intent/front_back/label",
             "intent_left_right": "/direction_intent/left_right/label",
             "intent_up_down": "/direction_intent/up_down/label",
@@ -142,6 +149,50 @@ class TelemetryNode(Node):
             ArmTask,
             self._topic_names["arm_task"],
             self.on_arm_task,
+            qos,
+        )
+        self.create_subscription(
+            Float32,
+            self._topic_names["d1_pink_current_z"],
+            lambda m: self.on_scalar_topic("d1_pink_current_z", m.data),
+            qos,
+        )
+        self.create_subscription(
+            Bool,
+            self._topic_names["d1_pink_enabled"],
+            lambda m: self.on_scalar_topic("d1_pink_enabled", bool(m.data)),
+            qos,
+        )
+        self.create_subscription(
+            String,
+            self._topic_names["d1_pink_mode"],
+            lambda m: self.on_scalar_topic("d1_pink_mode", m.data),
+            qos,
+        )
+        self.create_subscription(
+            Bool,
+            self._topic_names["d1_pink_mode_switch_startup_complete"],
+            lambda m: self.on_scalar_topic(
+                "d1_pink_mode_switch_startup_complete", bool(m.data)
+            ),
+            qos,
+        )
+        self.create_subscription(
+            Bool,
+            self._topic_names["d1_pink_startup_complete"],
+            lambda m: self.on_scalar_topic("d1_pink_startup_complete", bool(m.data)),
+            qos,
+        )
+        self.create_subscription(
+            Float32,
+            self._topic_names["d1_pink_z_ref"],
+            lambda m: self.on_scalar_topic("d1_pink_z_ref", float(m.data)),
+            qos,
+        )
+        self.create_subscription(
+            Float32,
+            self._topic_names["d1_pink_z_velocity"],
+            lambda m: self.on_scalar_topic("d1_pink_z_velocity", float(m.data)),
             qos,
         )
         self.create_subscription(
@@ -257,6 +308,13 @@ class TelemetryNode(Node):
 
     def on_arm_task(self, msg: ArmTask) -> None:
         self._mark_topic("arm_task")
+
+    def on_scalar_topic(self, key: str, value: object) -> None:
+        with self._lock:
+            t = time.monotonic()
+            self._status[key] = (True, t)
+            self._update_topic_rate(key, t)
+            self._topic_latest_msg[key] = str(value)
 
     def _mark_topic(self, key: str) -> None:
         with self._lock:
@@ -892,7 +950,6 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
     icon_lab_d1_active = launch_process_manager.is_running("icon_lab_d1_ros2")
     state_converter_active = launch_process_manager.is_running("state_converter_stack")
     arm_controller_active = launch_process_manager.is_arm_controller_running()
-    active_arm_controller_mode = launch_process_manager.get_active_arm_controller_mode()
     active_intent_estimator_modes = [
         mode
         for mode, config in _INTENT_ESTIMATORS.items()
@@ -997,8 +1054,6 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
                 st.info(msg)
             else:
                 st.warning(msg)
-        if active_arm_controller_mode == "pink_mode_switch":
-            st.caption("Active arm controller: D1 Pink Mode Switch")
         _render_module_card("arm_controller", "Arm Controller")
     with cols[2]:
         selected_coordination_mode = st.radio(
@@ -1035,6 +1090,32 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
                 st.warning(msg)
         _render_module_card("coordination_module", "Coordination Module")
     with cols[3]:
+        estimator_option_cols = st.columns(3)
+        with estimator_option_cols[0]:
+            enable_front_back_estimator = st.checkbox(
+                "Front/Back",
+                value=enable_front_back_estimator,
+                key="ctrl_enable_front_back_estimator",
+            )
+        with estimator_option_cols[1]:
+            enable_left_right_estimator = st.checkbox(
+                "Left/Right",
+                value=enable_left_right_estimator,
+                key="ctrl_enable_left_right_estimator",
+            )
+        with estimator_option_cols[2]:
+            enable_up_down_estimator = st.checkbox(
+                "Up/Down",
+                value=enable_up_down_estimator,
+                key="ctrl_enable_up_down_estimator",
+            )
+        selected_direction_estimators = []
+        if enable_front_back_estimator:
+            selected_direction_estimators.append("front_back")
+        if enable_left_right_estimator:
+            selected_direction_estimators.append("left_right")
+        if enable_up_down_estimator:
+            selected_direction_estimators.append("up_down")
         if active_intent_estimator_modes:
             active_labels = ", ".join(
                 _INTENT_ESTIMATORS[mode]["label"] for mode in active_intent_estimator_modes
@@ -1322,6 +1403,13 @@ def _rosbag_topic_groups(default_topics: list[str]) -> Dict[str, list[str]]:
             "/arm/commanded_angles",
             "/arm/servo_feedback",
             "/arm/servo_command",
+            "/d1_pink/current_z",
+            "/d1_pink/enabled",
+            "/d1_pink/mode",
+            "/d1_pink/mode_switch_startup_complete",
+            "/d1_pink/startup_complete",
+            "/d1_pink/z_ref",
+            "/d1_pink/z_velocity",
         ],
         "HQ-PCoT": [
             "/data/push_event",
@@ -1348,71 +1436,10 @@ def _rosbag_topic_groups(default_topics: list[str]) -> Dict[str, list[str]]:
     }
 
 
-def _render_sidebar() -> None:
-    snapshot = _get_dashboard_snapshot()
-    current_node_name = st.session_state.get("ros_node_name", _PRIMARY_ROS_NODE_NAME)
-
-    st.header("Settings")
-    foxglove_active = launch_process_manager.is_running("foxglove_bridge")
-    rosbag_active = launch_process_manager.is_running("rosbag_recording")
-    enable_front_back_estimator = st.session_state.get(
-        "ctrl_enable_front_back_estimator", True
-    )
-    enable_left_right_estimator = st.session_state.get(
-        "ctrl_enable_left_right_estimator", False
-    )
-    enable_up_down_estimator = st.session_state.get(
-        "ctrl_enable_up_down_estimator", False
-    )
-
-    st.subheader("Core Runtime")
-    st.caption("Runtime start/stop controls are shown above the module cards.")
-    st.subheader("Intent")
-    with st.expander("Direction Estimator Options", expanded=False):
-        enable_front_back_estimator = st.checkbox(
-            "Front/Back Estimator",
-            value=enable_front_back_estimator,
-            key="ctrl_enable_front_back_estimator",
-        )
-        enable_left_right_estimator = st.checkbox(
-            "Left/Right Estimator",
-            value=enable_left_right_estimator,
-            key="ctrl_enable_left_right_estimator",
-        )
-        enable_up_down_estimator = st.checkbox(
-            "Up/Down Estimator",
-            value=enable_up_down_estimator,
-            key="ctrl_enable_up_down_estimator",
-        )
-    st.subheader("Tools")
-    foxglove_label = (
-        "Stop Foxglove Bridge"
-        if foxglove_active
-        else "Start Foxglove Bridge"
-    )
-    if st.button(
-        foxglove_label,
-        key="toggle_foxglove",
-        use_container_width=True,
-        type="primary" if foxglove_active else "secondary",
-    ):
-        if foxglove_active:
-            ok, msg = launch_process_manager.stop_launch("foxglove_bridge")
-        else:
-            ok, msg = launch_process_manager.start_foxglove_bridge()
-        if ok:
-            st.info(msg)
-        else:
-            st.warning(msg)
-    rosbag_label = (
-        "Stop Rosbag Recording"
-        if rosbag_active
-        else "Start Rosbag Recording"
-    )
-    default_rosbag_topics = list(launch_process_manager.ROSBAG_TOPICS)
-    topic_groups = _rosbag_topic_groups(default_rosbag_topics)
+def _get_selected_tool_topics(default_topics: list[str]) -> tuple[list[str], list[str]]:
+    topic_groups = _rosbag_topic_groups(default_topics)
     group_names = list(topic_groups.keys())
-    valid_rosbag_topics = set(default_rosbag_topics)
+    valid_topics = set(default_topics)
     if "rosbag_topic_groups" not in st.session_state:
         st.session_state["rosbag_topic_groups"] = group_names
     else:
@@ -1427,32 +1454,73 @@ def _render_sidebar() -> None:
         st.session_state["rosbag_topics_custom"] = [
             topic
             for topic in st.session_state["rosbag_topics_custom"]
-            if topic in valid_rosbag_topics
+            if topic in valid_topics
         ]
+
     selected_group_names = st.multiselect(
-        "Rosbag Topic Groups",
+        "Topic Groups",
         options=group_names,
         key="rosbag_topic_groups",
-        disabled=rosbag_active,
-        help="Choose grouped topic presets for rosbag recording.",
+        help="Choose grouped topic presets for Foxglove and rosbag.",
     )
     with st.expander("Advanced Topic Selection", expanded=False):
         st.multiselect(
             "Additional Topics",
-            options=default_rosbag_topics,
+            options=default_topics,
             key="rosbag_topics_custom",
-            disabled=rosbag_active,
             help="Add individual topics on top of the selected groups.",
         )
+
     selected_topic_set = set(st.session_state["rosbag_topics_custom"])
     for group_name in selected_group_names:
         selected_topic_set.update(topic_groups[group_name])
-    selected_rosbag_topics = [
-        topic for topic in default_rosbag_topics if topic in selected_topic_set
+    selected_topics = [
+        topic for topic in default_topics if topic in selected_topic_set
     ]
-    st.caption(f"Rosbag topics selected: {len(selected_rosbag_topics)}")
+    return selected_group_names, selected_topics
+
+
+def _render_sidebar() -> None:
+    snapshot = _get_dashboard_snapshot()
+    current_node_name = st.session_state.get("ros_node_name", _PRIMARY_ROS_NODE_NAME)
+
+    st.header("Settings")
+    foxglove_active = launch_process_manager.is_running("foxglove_bridge")
+    rosbag_active = launch_process_manager.is_running("rosbag_recording")
+    st.subheader("Tools")
+    default_tool_topics = list(launch_process_manager.ROSBAG_TOPICS)
+    _selected_group_names, selected_tool_topics = _get_selected_tool_topics(default_tool_topics)
+    st.caption(f"Shared tool topics selected: {len(selected_tool_topics)}")
+    foxglove_label = (
+        "Stop Foxglove Bridge"
+        if foxglove_active
+        else "Start Foxglove Bridge"
+    )
+    if st.button(
+        foxglove_label,
+        key="toggle_foxglove",
+        use_container_width=True,
+        type="primary" if foxglove_active else "secondary",
+    ):
+        if foxglove_active:
+            ok, msg = launch_process_manager.stop_launch("foxglove_bridge")
+        else:
+            if not selected_tool_topics:
+                ok = False
+                msg = "select at least one topic group or individual topic"
+            else:
+                ok, msg = launch_process_manager.start_foxglove_bridge(selected_tool_topics)
+        if ok:
+            st.info(msg)
+        else:
+            st.warning(msg)
+    rosbag_label = (
+        "Stop Rosbag Recording"
+        if rosbag_active
+        else "Start Rosbag Recording"
+    )
     if rosbag_active:
-        st.caption("Rosbag topic selection is locked while recording is running.")
+        st.caption("Topic selection changes will apply after rosbag recording is stopped.")
     if st.button(
         rosbag_label,
         key="toggle_rosbag",
@@ -1462,12 +1530,12 @@ def _render_sidebar() -> None:
         if rosbag_active:
             ok, msg = launch_process_manager.stop_launch("rosbag_recording")
         else:
-            if not selected_rosbag_topics:
+            if not selected_tool_topics:
                 ok = False
                 msg = "select at least one rosbag topic group or individual topic"
             else:
                 ok, msg = launch_process_manager.start_rosbag_recording(
-                    selected_rosbag_topics
+                    selected_tool_topics
                 )
         if ok:
             st.info(msg)
@@ -1532,9 +1600,24 @@ def _render_dashboard() -> None:
             ],
         ),
         (
-            "HQ-PCoT",
+            "D1 Pink Debug",
             [
                 ("arm_task", "arm_task"),
+                ("d1_pink_mode", "d1_pink_mode"),
+                ("d1_pink_enabled", "d1_pink_enabled"),
+                (
+                    "d1_pink_mode_switch_startup_complete",
+                    "d1_pink_mode_switch_startup_complete",
+                ),
+                ("d1_pink_startup_complete", "d1_pink_startup_complete"),
+                ("d1_pink_z_ref", "d1_pink_z_ref"),
+                ("d1_pink_z_velocity", "d1_pink_z_velocity"),
+                ("d1_pink_current_z", "d1_pink_current_z"),
+            ],
+        ),
+        (
+            "HQ-PCoT",
+            [
                 ("locomotion_cmd", "locomotion_cmd"),
                 ("imu", "imu"),
                 ("joint_states", "joint_states"),
@@ -1631,12 +1714,15 @@ def _render_dashboard() -> None:
             ok = _topic_ok(topic_key, status_key)
             available = bool(topic_available.get(topic_key, False))
             rate_hz = topic_rate.get(key)
+            latest_value = topic_latest_msg.get(key)
             parts = [topic_key]
             if available:
                 if rate_hz is not None:
                     parts.append(f"hz={rate_hz:.1f}")
                 else:
                     parts.append("hz=--")
+            if latest_value is not None:
+                parts.append(f"latest={latest_value}")
             cls = "topic-ok" if ok else "topic-bad"
             badges.append(f"<span class=\"{cls}\">{' | '.join(parts)}</span>")
         group_blocks.append(
@@ -1688,8 +1774,18 @@ def _render_dashboard() -> None:
         st.caption("No ROS nodes currently visible to the dashboard.")
 
 
+def _render_runtime_banner() -> None:
+    node_name = st.session_state.get("ros_node_name", _PRIMARY_ROS_NODE_NAME)
+    runtime_state, runtime_message = _get_ros_runtime_state(node_name)
+    if runtime_state == "pending":
+        st.caption("Initializing ROS runtime...")
+    elif runtime_state == "error":
+        st.error(f"ROS runtime failed to initialize: {runtime_message}")
+
+
 if hasattr(st, "fragment"):
     _render_sidebar = st.fragment(run_every="2s")(_render_sidebar)
+    _render_runtime_banner = st.fragment(run_every="2s")(_render_runtime_banner)
     _render_dashboard = st.fragment(run_every="2s")(_render_dashboard)
 
 
@@ -1701,13 +1797,9 @@ def main() -> None:
     node_name = _PRIMARY_ROS_NODE_NAME
     st.session_state["ros_node_name"] = node_name
     _start_ros_runtime_async(node_name)
-    runtime_state, runtime_message = _get_ros_runtime_state(node_name)
     with st.sidebar:
         _render_sidebar()
-    if runtime_state == "pending":
-        st.caption("Initializing ROS runtime...")
-    elif runtime_state == "error":
-        st.error(f"ROS runtime failed to initialize: {runtime_message}")
+    _render_runtime_banner()
     _render_dashboard()
 
 
