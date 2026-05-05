@@ -12,7 +12,7 @@ import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from hq_pcot_msgs.msg import LoopStatus
-from icon_lab_d1_ros2.msg import ServoFeedback
+from icon_lab_d1_ros2.msg import ServoCommand, ServoFeedback
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -132,6 +132,7 @@ class UpDownIntentEstimatorNode(Node):
         self.model_dir = default_model_dir.expanduser()
         self.lowstate_topic = "/lowstate"
         self.arm_feedback_topic = "/arm/servo_feedback"
+        self.arm_command_topic = "/arm/servo_command"
         self.output_topic = "/direction_intent/up_down/label"
         self.raw_scores_topic = "/direction_intent/up_down/scores_raw"
         self.smoothed_scores_topic = "/direction_intent/up_down/scores_smoothed"
@@ -178,13 +179,23 @@ class UpDownIntentEstimatorNode(Node):
         self.requires_lowstate = bool(
             self.selected_feature_names.intersection({"ff", "accel", "dq"})
         )
-        self.requires_arm_angles = bool(
-            self.selected_feature_names.intersection({"arm_angles", "arm_currents"})
+        self.requires_arm_feedback = bool(
+            self.selected_feature_names.intersection(
+                {"arm_angles", "arm_currents", "arm_velocities"}
+            )
+        )
+        self.requires_last_action = bool(
+            self.selected_feature_names.intersection({"last_action"})
         )
         self.model_arm_joint_indices = self.MODEL_ARM_JOINT_INDICES
         expected_arm_width = len(self.model_arm_joint_indices)
         for feature in self.selected_features:
-            if feature.name not in {"arm_angles", "arm_currents"}:
+            if feature.name not in {
+                "arm_angles",
+                "arm_currents",
+                "arm_velocities",
+                "last_action",
+            }:
                 continue
             if feature.width != expected_arm_width:
                 raise RuntimeError(
@@ -194,12 +205,17 @@ class UpDownIntentEstimatorNode(Node):
         self.input_topics: list[str] = []
         if self.requires_lowstate:
             self.input_topics.append(self.lowstate_topic)
-        if self.requires_arm_angles:
+        if self.requires_arm_feedback:
             self.input_topics.append(self.arm_feedback_topic)
+        if self.requires_last_action:
+            self.input_topics.append(self.arm_command_topic)
         self.have_lowstate = False
-        self.have_arm_angles = False
+        self.have_arm_feedback = False
+        self.have_last_action = False
         self.latest_arm_angles: list[float] = [0.0] * expected_arm_width
         self.latest_arm_currents: list[float] = [0.0] * expected_arm_width
+        self.latest_arm_velocities: list[float] = [0.0] * expected_arm_width
+        self.latest_last_action: list[float] = [0.0] * expected_arm_width
         self.status_code = self.STATUS_WAITING_FOR_TOPICS
         self.waiting_on: str | None = None
         self.running_logged = False
@@ -233,9 +249,14 @@ class UpDownIntentEstimatorNode(Node):
                 LowState, self.lowstate_topic, self.on_lowstate, sensor_qos
             )
         self.sub_arm_feedback = None
-        if self.requires_arm_angles:
+        if self.requires_arm_feedback:
             self.sub_arm_feedback = self.create_subscription(
                 ServoFeedback, self.arm_feedback_topic, self.on_arm_feedback, sensor_qos
+            )
+        self.sub_arm_command = None
+        if self.requires_last_action:
+            self.sub_arm_command = self.create_subscription(
+                ServoCommand, self.arm_command_topic, self.on_arm_command, sensor_qos
             )
         self.pub_raw_scores = self.create_publisher(
             Float32MultiArray, self.raw_scores_topic, 10
@@ -368,8 +389,10 @@ class UpDownIntentEstimatorNode(Node):
         missing_topics: list[str] = []
         if self.requires_lowstate and not self.have_lowstate:
             missing_topics.append(self.lowstate_topic)
-        if self.requires_arm_angles and not self.have_arm_angles:
+        if self.requires_arm_feedback and not self.have_arm_feedback:
             missing_topics.append(self.arm_feedback_topic)
+        if self.requires_last_action and not self.have_last_action:
+            missing_topics.append(self.arm_command_topic)
         return missing_topics
 
     def _build_source_vectors(self, lowstate_msg: LowState | None) -> dict[str, object]:
@@ -388,9 +411,12 @@ class UpDownIntentEstimatorNode(Node):
                     "dq": leg_dq,
                 }
             )
-        if self.requires_arm_angles:
+        if self.requires_arm_feedback:
             source_vectors["arm_angles"] = self.latest_arm_angles
             source_vectors["arm_currents"] = self.latest_arm_currents
+            source_vectors["arm_velocities"] = self.latest_arm_velocities
+        if self.requires_last_action:
+            source_vectors["last_action"] = self.latest_last_action
         for feature in self.selected_features:
             if feature.name in source_vectors:
                 continue
@@ -418,6 +444,15 @@ class UpDownIntentEstimatorNode(Node):
                         len(msg.current_ma),
                     )
                 )
+            if len(msg.velocity_deg_s) < required_joint_count:
+                raise ValueError(
+                    "Expected /arm/servo_feedback velocity_deg_s to have length >= %d for joints %s, got %d"
+                    % (
+                        required_joint_count,
+                        self.model_arm_joint_indices,
+                        len(msg.velocity_deg_s),
+                    )
+                )
             self.latest_arm_angles = [
                 float(msg.angle_deg[joint_index])
                 for joint_index in self.model_arm_joint_indices
@@ -426,10 +461,43 @@ class UpDownIntentEstimatorNode(Node):
                 float(msg.current_ma[joint_index])
                 for joint_index in self.model_arm_joint_indices
             ]
+            self.latest_arm_velocities = [
+                float(msg.velocity_deg_s[joint_index])
+                for joint_index in self.model_arm_joint_indices
+            ]
         except ValueError as exc:
             self.get_logger().error(str(exc))
             return
-        self.have_arm_angles = True
+        self.have_arm_feedback = True
+        self._update_status()
+        self._maybe_run_inference(None)
+
+    def on_arm_command(self, msg: ServoCommand) -> None:
+        try:
+            required_joint_count = max(self.model_arm_joint_indices) + 1
+            if len(msg.angle_deg) < required_joint_count:
+                raise ValueError(
+                    "Expected /arm/servo_command angle_deg to have length >= %d for joints %s, got %d"
+                    % (
+                        required_joint_count,
+                        self.model_arm_joint_indices,
+                        len(msg.angle_deg),
+                    )
+                )
+            last_action = [
+                float(msg.angle_deg[joint_index])
+                for joint_index in self.model_arm_joint_indices
+            ]
+            if not np.all(np.isfinite(np.asarray(last_action, dtype=float))):
+                raise ValueError(
+                    "Expected finite /arm/servo_command angle_deg values for joints %s."
+                    % (self.model_arm_joint_indices,)
+                )
+            self.latest_last_action = last_action
+        except ValueError as exc:
+            self.get_logger().error(str(exc))
+            return
+        self.have_last_action = True
         self._update_status()
         self._maybe_run_inference(None)
 
@@ -456,17 +524,29 @@ class UpDownIntentEstimatorNode(Node):
                     f"{max_index + 1} entries, got {len(lowstate_msg.motor_state)}"
                 )
             expected_arm_width = len(self.model_arm_joint_indices)
-            if self.requires_arm_angles and len(self.latest_arm_angles) != expected_arm_width:
+            if self.requires_arm_feedback and len(self.latest_arm_angles) != expected_arm_width:
                 raise ValueError(
                     "Expected latest mapped /arm/servo_feedback angle_deg to have length %d, got "
                     % expected_arm_width
                     + f"{len(self.latest_arm_angles)}"
                 )
-            if self.requires_arm_angles and len(self.latest_arm_currents) != expected_arm_width:
+            if self.requires_arm_feedback and len(self.latest_arm_currents) != expected_arm_width:
                 raise ValueError(
                     "Expected latest mapped /arm/servo_feedback current_ma to have length %d, got "
                     % expected_arm_width
                     + f"{len(self.latest_arm_currents)}"
+                )
+            if self.requires_arm_feedback and len(self.latest_arm_velocities) != expected_arm_width:
+                raise ValueError(
+                    "Expected latest mapped /arm/servo_feedback velocity_deg_s to have length %d, got "
+                    % expected_arm_width
+                    + f"{len(self.latest_arm_velocities)}"
+                )
+            if self.requires_last_action and len(self.latest_last_action) != expected_arm_width:
+                raise ValueError(
+                    "Expected latest mapped /arm/servo_command angle_deg to have length %d, got "
+                    % expected_arm_width
+                    + f"{len(self.latest_last_action)}"
                 )
             if self._missing_topics():
                 return
