@@ -490,6 +490,17 @@ class D1PinkModeSwitchController(Node):
         msg.data = bool(self.startup_complete)
         self.startup_complete_pub.publish(msg)
 
+    def _publish_debug_state(self) -> None:
+        if self.current_mode is not None:
+            self._publish_mode()
+        enabled_msg = Bool()
+        enabled_msg.data = bool(self.z_ref_enabled)
+        self.z_ref_enabled_pub.publish(enabled_msg)
+        self._publish_startup_complete()
+        z_velocity_msg = Float32()
+        z_velocity_msg.data = float(self.last_commanded_z_velocity_mps)
+        self.z_velocity_pub.publish(z_velocity_msg)
+
     def _on_timer(self) -> None:
         loop_start = time.perf_counter()
         try:
@@ -500,8 +511,6 @@ class D1PinkModeSwitchController(Node):
             ):
                 self._update_status()
                 return
-
-            self._publish_startup_complete()
 
             if not self.startup_started:
                 self.startup_started = True
@@ -589,6 +598,7 @@ class D1PinkModeSwitchController(Node):
             self.current_switch_latched = False
             self._update_status()
         finally:
+            self._publish_debug_state()
             loop_time_ms = (time.perf_counter() - loop_start) * 1000.0
             self._record_loop_time_ms(loop_time_ms)
 

@@ -67,7 +67,7 @@ class TeleopCoordinator(Node):
         self.declare_parameter("status_topic", "/status/coordination_module")
         self.declare_parameter("status_hz", 10.0)
         self.declare_parameter("push_event_hz", 10.0)
-        self.declare_parameter("publish_hz", 50.0)
+        self.declare_parameter("publish_hz", 20.0)
         self.declare_parameter("cmd_timeout_s", 0.5)
         self.declare_parameter("deadzone", 0.05)
         self.declare_parameter("arm_deadzone", 0.2)

@@ -86,6 +86,7 @@ class D1PinkZRefController(Node):
         )
         self.enabled_sub = self.create_subscription(Bool, enabled_topic, self._handle_enabled, 10)
         self.command_pub = self.create_publisher(ServoCommand, command_topic, 10)
+        self.z_ref_pub = self.create_publisher(Float32, z_ref_topic, 10)
         self.current_z_pub = self.create_publisher(Float32, current_z_topic, 10)
         self.startup_complete_pub = self.create_publisher(Bool, startup_complete_topic, 10)
 
@@ -154,6 +155,13 @@ class D1PinkZRefController(Node):
         msg.data = float(current_z)
         self.current_z_pub.publish(msg)
 
+    def _publish_z_ref(self) -> None:
+        if self.desired_z_reference_m is None:
+            return
+        msg = Float32()
+        msg.data = float(self.desired_z_reference_m)
+        self.z_ref_pub.publish(msg)
+
     def _publish_startup_complete(self) -> None:
         msg = Bool()
         msg.data = bool(self.startup_complete)
@@ -189,6 +197,7 @@ class D1PinkZRefController(Node):
         current_z = self.solver.get_current_z(current_model_q)
         self._publish_current_z(current_z)
         self._publish_startup_complete()
+        self._publish_z_ref()
 
         if self.defer_startup_until_enabled:
             if not self.ik_enabled:
@@ -201,6 +210,7 @@ class D1PinkZRefController(Node):
                 self.startup_complete = True
                 self.last_tracking_command_deg = None
                 self._publish_startup_complete()
+                self._publish_z_ref()
                 self.get_logger().info(
                     "Initialized Pink z_ref after external enable; "
                     f"reseeded q0 from current pose (nominal z={seeded_z:.4f} m) and kept z_ref={self.desired_z_reference_m:.4f} m"
@@ -227,6 +237,7 @@ class D1PinkZRefController(Node):
             self.startup_complete = True
             self.last_tracking_command_deg = None
             self._publish_startup_complete()
+            self._publish_z_ref()
             self.get_logger().info(
                 "Startup settle complete. Seeded q0 from settled pose, "
                 f"nominal z={settled_z:.4f} m, synced z_ref={self.desired_z_reference_m:.4f} m, and auto-enabled Pink IK"
@@ -248,6 +259,7 @@ class D1PinkZRefController(Node):
                     self.solver.z_ref_max_m,
                 )
             )
+        self._publish_z_ref()
 
         try:
             result = self.solver.solve_step(
