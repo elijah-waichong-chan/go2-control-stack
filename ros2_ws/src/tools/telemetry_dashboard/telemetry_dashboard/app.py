@@ -104,6 +104,8 @@ class TelemetryNode(Node):
             "arm_command_state": "/arm/commanded_angles",
             "arm_task": "/arm_task",
             "d1_pink_current_z": "/d1_pink/current_z",
+            "d1_pink_solver_current_z": "/d1_pink/solver_current_z",
+            "d1_pink_solver_target_z": "/d1_pink/solver_target_z",
             "d1_pink_enabled": "/d1_pink/enabled",
             "d1_pink_mode": "/d1_pink/mode",
             "d1_pink_mode_switch_startup_complete": "/d1_pink/mode_switch_startup_complete",
@@ -155,6 +157,18 @@ class TelemetryNode(Node):
             Float32,
             self._topic_names["d1_pink_current_z"],
             lambda m: self.on_scalar_topic("d1_pink_current_z", m.data),
+            qos,
+        )
+        self.create_subscription(
+            Float32,
+            self._topic_names["d1_pink_solver_current_z"],
+            lambda m: self.on_scalar_topic("d1_pink_solver_current_z", m.data),
+            qos,
+        )
+        self.create_subscription(
+            Float32,
+            self._topic_names["d1_pink_solver_target_z"],
+            lambda m: self.on_scalar_topic("d1_pink_solver_target_z", m.data),
             qos,
         )
         self.create_subscription(
@@ -1404,6 +1418,8 @@ def _rosbag_topic_groups(default_topics: list[str]) -> Dict[str, list[str]]:
             "/arm/servo_feedback",
             "/arm/servo_command",
             "/d1_pink/current_z",
+            "/d1_pink/solver_current_z",
+            "/d1_pink/solver_target_z",
             "/d1_pink/enabled",
             "/d1_pink/mode",
             "/d1_pink/mode_switch_startup_complete",
@@ -1605,6 +1621,8 @@ def _render_dashboard() -> None:
                 ("arm_task", "arm_task"),
                 ("d1_pink_mode", "d1_pink_mode"),
                 ("d1_pink_enabled", "d1_pink_enabled"),
+                ("d1_pink_solver_target_z", "d1_pink_solver_target_z"),
+                ("d1_pink_solver_current_z", "d1_pink_solver_current_z"),
                 (
                     "d1_pink_mode_switch_startup_complete",
                     "d1_pink_mode_switch_startup_complete",

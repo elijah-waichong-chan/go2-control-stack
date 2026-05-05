@@ -30,6 +30,8 @@ class D1PinkZRefController(Node):
         self.declare_parameter("z_ref_topic", "/d1_pink/z_ref")
         self.declare_parameter("z_velocity_topic", "/d1_pink/z_velocity")
         self.declare_parameter("current_z_topic", "/d1_pink/current_z")
+        self.declare_parameter("solver_target_z_topic", "/d1_pink/solver_target_z")
+        self.declare_parameter("solver_current_z_topic", "/d1_pink/solver_current_z")
         self.declare_parameter("enabled_topic", "/d1_pink/enabled")
         self.declare_parameter("startup_complete_topic", "/d1_pink/startup_complete")
         self.declare_parameter("control_rate_hz", 20.0)
@@ -48,6 +50,8 @@ class D1PinkZRefController(Node):
         z_ref_topic = self.get_parameter("z_ref_topic").value
         z_velocity_topic = self.get_parameter("z_velocity_topic").value
         current_z_topic = self.get_parameter("current_z_topic").value
+        solver_target_z_topic = self.get_parameter("solver_target_z_topic").value
+        solver_current_z_topic = self.get_parameter("solver_current_z_topic").value
         enabled_topic = self.get_parameter("enabled_topic").value
         startup_complete_topic = self.get_parameter("startup_complete_topic").value
         self.control_rate_hz = float(self.get_parameter("control_rate_hz").value)
@@ -88,6 +92,8 @@ class D1PinkZRefController(Node):
         self.command_pub = self.create_publisher(ServoCommand, command_topic, 10)
         self.z_ref_pub = self.create_publisher(Float32, z_ref_topic, 10)
         self.current_z_pub = self.create_publisher(Float32, current_z_topic, 10)
+        self.solver_target_z_pub = self.create_publisher(Float32, solver_target_z_topic, 10)
+        self.solver_current_z_pub = self.create_publisher(Float32, solver_current_z_topic, 10)
         self.startup_complete_pub = self.create_publisher(Bool, startup_complete_topic, 10)
 
         self.latest_servo_feedback_deg: np.ndarray | None = None
@@ -102,6 +108,8 @@ class D1PinkZRefController(Node):
         self.get_logger().info(
             f"Pink z_ref controller running on {feedback_topic} -> {command_topic} "
             f"with z_ref topic {z_ref_topic}, z velocity topic {z_velocity_topic} "
+            f"solver target z topic {solver_target_z_topic}, "
+            f"solver current z topic {solver_current_z_topic}, "
             f"at {self.control_rate_hz:.1f} Hz; "
             f"command interval {self.tracking_command_interval_ms} ms; "
             f"startup velocity {self.startup_velocity_deg_s:.1f} deg/s; "
@@ -155,12 +163,24 @@ class D1PinkZRefController(Node):
         msg.data = float(current_z)
         self.current_z_pub.publish(msg)
 
+    def _publish_solver_current_z(self, current_z: float) -> None:
+        msg = Float32()
+        msg.data = float(current_z)
+        self.solver_current_z_pub.publish(msg)
+
     def _publish_z_ref(self) -> None:
         if self.desired_z_reference_m is None:
             return
         msg = Float32()
         msg.data = float(self.desired_z_reference_m)
         self.z_ref_pub.publish(msg)
+
+    def _publish_solver_target_z(self) -> None:
+        if self.desired_z_reference_m is None:
+            return
+        msg = Float32()
+        msg.data = float(self.desired_z_reference_m)
+        self.solver_target_z_pub.publish(msg)
 
     def _publish_startup_complete(self) -> None:
         msg = Bool()
@@ -196,8 +216,10 @@ class D1PinkZRefController(Node):
         current_model_q = self.solver.servo_to_model(self.latest_servo_feedback_deg)
         current_z = self.solver.get_current_z(current_model_q)
         self._publish_current_z(current_z)
+        self._publish_solver_current_z(current_z)
         self._publish_startup_complete()
         self._publish_z_ref()
+        self._publish_solver_target_z()
 
         if self.defer_startup_until_enabled:
             if not self.ik_enabled:
@@ -211,6 +233,7 @@ class D1PinkZRefController(Node):
                 self.last_tracking_command_deg = None
                 self._publish_startup_complete()
                 self._publish_z_ref()
+                self._publish_solver_target_z()
                 self.get_logger().info(
                     "Initialized Pink z_ref after external enable; "
                     f"reseeded q0 from current pose (nominal z={seeded_z:.4f} m) and kept z_ref={self.desired_z_reference_m:.4f} m"
@@ -238,6 +261,7 @@ class D1PinkZRefController(Node):
             self.last_tracking_command_deg = None
             self._publish_startup_complete()
             self._publish_z_ref()
+            self._publish_solver_target_z()
             self.get_logger().info(
                 "Startup settle complete. Seeded q0 from settled pose, "
                 f"nominal z={settled_z:.4f} m, synced z_ref={self.desired_z_reference_m:.4f} m, and auto-enabled Pink IK"
@@ -260,6 +284,7 @@ class D1PinkZRefController(Node):
                 )
             )
         self._publish_z_ref()
+        self._publish_solver_target_z()
 
         try:
             result = self.solver.solve_step(
@@ -272,6 +297,7 @@ class D1PinkZRefController(Node):
             return
 
         self._publish_current_z(result.current_z_m)
+        self._publish_solver_current_z(result.current_z_m)
         servo_targets = self.solver.model_to_servo(
             result.joint_command_deg, self.latest_servo_feedback_deg
         )
