@@ -15,7 +15,9 @@ Runtime Python dependencies are not vendored in this repo. Install them separate
 - one supported QP backend such as `quadprog` or `osqp`
 
 This package no longer provides a GUI. Another node is expected to publish
-`/d1_pink/z_ref`, `/d1_pink/z_velocity`, and `/d1_pink/enabled`.
+`/d1_pink/z_velocity` and `/d1_pink/enabled`.
+
+`/d1_pink/z_ref` is published by the controller as its internal z target state.
 
 Example:
 

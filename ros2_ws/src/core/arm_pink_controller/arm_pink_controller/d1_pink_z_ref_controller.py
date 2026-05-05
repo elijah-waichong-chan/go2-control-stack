@@ -84,7 +84,6 @@ class D1PinkZRefController(Node):
         self.feedback_sub = self.create_subscription(
             ServoFeedback, feedback_topic, self._handle_feedback, 10
         )
-        self.z_ref_sub = self.create_subscription(Float32, z_ref_topic, self._handle_z_ref, 10)
         self.z_velocity_sub = self.create_subscription(
             Float32, z_velocity_topic, self._handle_z_velocity, 10
         )
@@ -107,7 +106,7 @@ class D1PinkZRefController(Node):
 
         self.get_logger().info(
             f"Pink z_ref controller running on {feedback_topic} -> {command_topic} "
-            f"with z_ref topic {z_ref_topic}, z velocity topic {z_velocity_topic} "
+            f"publishing z_ref state topic {z_ref_topic}, z velocity input topic {z_velocity_topic} "
             f"solver target z topic {solver_target_z_topic}, "
             f"solver current z topic {solver_current_z_topic}, "
             f"at {self.control_rate_hz:.1f} Hz; "
@@ -137,11 +136,6 @@ class D1PinkZRefController(Node):
         current_model_q = self.solver.servo_to_model(values)
         current_z = self.solver.get_current_z(current_model_q)
         self._publish_current_z(current_z)
-
-    def _handle_z_ref(self, msg: Float32) -> None:
-        self.desired_z_reference_m = float(
-            np.clip(msg.data, self.solver.z_ref_min_m, self.solver.z_ref_max_m)
-        )
 
     def _handle_z_velocity(self, msg: Float32) -> None:
         self.manual_z_velocity_mps = float(
