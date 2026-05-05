@@ -44,6 +44,17 @@ labels:
     0: 0
     1: 5
     2: 6
+inference:
+  output_type: logits
+  postprocess: softmax
+  prediction_rule: argmax
+  nonzero_prediction_threshold: 0.85
+  zero_index: 0
+  nonzero_indices: [1, 2]
+  score_smoothing:
+    method: ema
+    ema_alpha: 0.2
+    moving_average_window: 5
 preprocessing:
   normalize: true
   x_mean: [1.0847020149230957, 33.16244888305664, -33.59381866455078, 23.457189559936523, 115.76432037353516, 96.75335693359375, -0.019966771826148033, -0.23615646362304688, 0.06626547127962112, 0.8569892644882202, 32.9381103515625, -33.89503479003906]
