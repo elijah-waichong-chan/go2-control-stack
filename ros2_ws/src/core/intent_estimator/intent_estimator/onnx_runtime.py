@@ -201,6 +201,7 @@ class SelectedFeature:
     width: int
     source_start: int
     source_end: int
+    source_indices: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -232,6 +233,7 @@ def load_selected_features(deploy_cfg: dict[str, Any]) -> tuple[SelectedFeature,
         width = int(raw_feature.get("width", 0))
         raw_source_start = raw_feature.get("source_start")
         raw_source_end = raw_feature.get("source_end")
+        raw_source_indices = raw_feature.get("source_indices")
         if not name:
             raise RuntimeError(
                 "deploy.yaml features.selected[%d].name is required." % index
@@ -240,9 +242,38 @@ def load_selected_features(deploy_cfg: dict[str, Any]) -> tuple[SelectedFeature,
             raise RuntimeError(
                 "deploy.yaml features.selected[%d].width must be > 0." % index
             )
+        source_indices: tuple[int, ...] | None = None
+        if raw_source_indices is not None:
+            if not isinstance(raw_source_indices, list):
+                raise RuntimeError(
+                    "deploy.yaml features.selected[%d].source_indices must be a list."
+                    % index
+                )
+            source_indices = tuple(int(source_index) for source_index in raw_source_indices)
+            if len(source_indices) != width:
+                raise RuntimeError(
+                    "deploy.yaml features.selected[%d] width=%d does not match "
+                    "len(source_indices)=%d."
+                    % (index, width, len(source_indices))
+                )
+            if any(source_index < 0 for source_index in source_indices):
+                raise RuntimeError(
+                    "deploy.yaml features.selected[%d].source_indices entries must be >= 0."
+                    % index
+                )
+            if len(set(source_indices)) != len(source_indices):
+                raise RuntimeError(
+                    "deploy.yaml features.selected[%d].source_indices must not contain duplicates."
+                    % index
+                )
+
         if raw_source_start is None and raw_source_end is None:
             source_start = next_default_start
-            source_end = source_start + width
+            if source_indices is None:
+                source_end = source_start + width
+            else:
+                source_start = min(source_indices)
+                source_end = max(source_indices) + 1
         elif raw_source_start is None or raw_source_end is None:
             raise RuntimeError(
                 "deploy.yaml features.selected[%d] must declare both source_start "
@@ -261,12 +292,21 @@ def load_selected_features(deploy_cfg: dict[str, Any]) -> tuple[SelectedFeature,
                 "deploy.yaml features.selected[%d].source_end must be > source_start."
                 % index
             )
-        if (source_end - source_start) != width:
+        if source_indices is None and (source_end - source_start) != width:
             raise RuntimeError(
                 "deploy.yaml features.selected[%d] width=%d does not match "
                 "source_end-source_start=%d."
                 % (index, width, source_end - source_start)
             )
+        if source_indices is not None:
+            if any(
+                source_index < source_start or source_index >= source_end
+                for source_index in source_indices
+            ):
+                raise RuntimeError(
+                    "deploy.yaml features.selected[%d].source_indices must lie within "
+                    "[source_start, source_end)." % index
+                )
 
         selected.append(
             SelectedFeature(
@@ -274,6 +314,7 @@ def load_selected_features(deploy_cfg: dict[str, Any]) -> tuple[SelectedFeature,
                 width=width,
                 source_start=source_start,
                 source_end=source_end,
+                source_indices=source_indices,
             )
         )
         next_default_start = source_end
@@ -294,7 +335,14 @@ def build_observation_vector(
     if not selected_features:
         return np.empty((0,), dtype=np.float32)
 
-    observation_width = max(feature.source_end for feature in selected_features)
+    observation_width = max(
+        (
+            max(feature.source_indices) + 1
+            if feature.source_indices is not None
+            else feature.source_end
+        )
+        for feature in selected_features
+    )
     observation = np.zeros((observation_width,), dtype=np.float32)
     occupied = np.zeros((observation_width,), dtype=bool)
 
@@ -310,15 +358,25 @@ def build_observation_vector(
                 % (feature.name, feature.width, vector.shape)
             )
 
-        start = feature.source_start
-        end = feature.source_end
-        if occupied[start:end].any():
-            raise ValueError(
-                "Overlapping deploy feature slice for %r at [%d:%d]."
-                % (feature.name, start, end)
-            )
-        observation[start:end] = vector
-        occupied[start:end] = True
+        if feature.source_indices is not None:
+            indices = np.asarray(feature.source_indices, dtype=int)
+            if occupied[indices].any():
+                raise ValueError(
+                    "Overlapping deploy feature indices for %r at %s."
+                    % (feature.name, list(feature.source_indices))
+                )
+            observation[indices] = vector
+            occupied[indices] = True
+        else:
+            start = feature.source_start
+            end = feature.source_end
+            if occupied[start:end].any():
+                raise ValueError(
+                    "Overlapping deploy feature slice for %r at [%d:%d]."
+                    % (feature.name, start, end)
+                )
+            observation[start:end] = vector
+            occupied[start:end] = True
 
     return observation
 
@@ -333,7 +391,11 @@ def build_selected_feature_vector(
         return observation
 
     parts = [
-        observation[feature.source_start:feature.source_end]
+        (
+            observation[np.asarray(feature.source_indices, dtype=int)]
+            if feature.source_indices is not None
+            else observation[feature.source_start:feature.source_end]
+        )
         for feature in selected_features
     ]
     return np.concatenate(parts, axis=0)
