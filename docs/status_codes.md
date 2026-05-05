@@ -43,15 +43,6 @@ Source: `locomotion_controller/standup_init.py`
 - `2`: waiting for `/lowstate`
 - `3`: stand-up complete
 
-### `/status/state_estimator`
-
-Message type: `go2_msgs/LoopStatus`
-
-Source: `go2_odometry/scripts/inekf_odom.py`
-
-- `1`: running
-- `2`: waiting for `/status/standing_init` readiness
-
 ### `/status/intent_estimator/left_right`
 
 Message type: `go2_msgs/LoopStatus`

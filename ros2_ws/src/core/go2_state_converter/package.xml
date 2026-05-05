@@ -1,27 +1,27 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>hq_pcot</name>
+  <name>go2_state_converter</name>
   <version>0.0.0</version>
-  <description>Central launch package for the HQ PCOT control stack.</description>
+  <description>Convert Go2 lowstate and D1 servo feedback into standard ROS state topics.</description>
   <maintainer email="chanwaichong0352@gmail.com">elijah</maintainer>
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <exec_depend>ament_index_python</exec_depend>
+  <depend>icon_lab_d1_ros2</depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>unitree_go</depend>
+
+  <exec_depend>go2_d1_integration</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
-
-  <exec_depend>arm_pink_controller</exec_depend>
-  <exec_depend>go2_d1_integration</exec_depend>
-  <exec_depend>go2_state_converter</exec_depend>
-  <exec_depend>icon_lab_d1_ros2</exec_depend>
-  <exec_depend>intent_estimator</exec_depend>
-  <exec_depend>locomotion_controller_cpp</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
-  <exec_depend>telemetry_dashboard</exec_depend>
   <exec_depend>xacro</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

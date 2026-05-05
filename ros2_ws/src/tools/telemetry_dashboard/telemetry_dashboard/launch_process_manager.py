@@ -194,8 +194,6 @@ def start_rosbag_recording(selected_topics: Sequence[str] | None = None) -> Tupl
                 "-o",
                 str(bag_path),
                 *topics,
-                # "/odometry/filtered",
-                # "/locomotion_cmd"
             ],
             f"started rosbag recording to {bag_path} ({len(topics)} topics)",
             cwd=repo_root,
@@ -213,8 +211,8 @@ def start_state_converter_stack() -> Tuple[bool, str]:
         try:
             ok, msg = _start_process(
                 "state_converter_stack",
-                ["ros2", "launch", "go2_odometry", "go2_state_publisher.launch.py"],
-                "started go2_odometry go2_state_publisher.launch.py",
+                ["ros2", "launch", "go2_state_converter", "state_converter.launch.py"],
+                "started go2_state_converter state_converter.launch.py",
             )
             if not ok:
                 return False, msg

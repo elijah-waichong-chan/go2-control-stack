@@ -21,7 +21,7 @@ The stack includes:
 | `ros2_ws/src/core` | Core HQ-PCOT packages, launch files, and message definitions. |
 | `ros2_ws/src/tools` | Tooling packages, including the telemetry dashboard. |
 | `ros2_ws/src/descriptions` | Robot description and integration packages for the Go2 and D1 arm. |
-| `ros2_ws/src/vendor` | Third-party and forked dependencies such as InEKF and Unitree packages. |
+| `ros2_ws/src/vendor` | Third-party dependencies such as the Unitree ROS 2 SDK sources. |
 | `docs` | Project documentation, including status topic references. |
 
 ## Installation
@@ -96,10 +96,8 @@ If your Docker installation requires elevated privileges, prepend `sudo` to the 
 
 | Submodule Path | URL |
 | --- | --- |
-| `ros2_ws/src/core/go2_odometry` | `https://github.com/elijah-waichong-chan/go2_odometry.git` |
 | `ros2_ws/src/vendor/unitree_ros2` | `https://github.com/unitreerobotics/unitree_ros2.git` |
 | `ros2_ws/src/descriptions/unitree_description` | `https://github.com/inria-paris-robotics-lab/unitree_description.git` |
-| `ros2_ws/src/vendor/inekf` | `https://github.com/elijah-waichong-chan/invariant-ekf.git` |
 
 ## Run
 
@@ -118,13 +116,6 @@ Then:
 2. Click `Start Control Stack` to launch the stack-managed nodes
 3. Optionally click `Start Foxglove Bridge` to start the Foxglove bridge on port `8765`
 
-## InEKF Debug
-
-```bash
-export PYTHONPATH=/usr/local/lib/python3.10/dist-packages:$PYTHONPATH
-export LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/cmeel.prefix/lib:$LD_LIBRARY_PATH
-```
-
 ## Onnxruntime Debug
 
 ```bash
@@ -141,8 +132,7 @@ export LD_LIBRARY_PATH="$ONNXRUNTIME_ROOT/lib:${LD_LIBRARY_PATH}"
 | `arm_pink_controller` | Pink-based D1 arm controller and mode-switch utilities. |
 | `icon_lab_d1_ros2` | ROS/UDP bridge for D1 servo feedback and command transport. |
 | `coordination_module` | Coordination logic built around HQ-PCOT custom messages. |
-| `estimator_bridge` | Converts estimator outputs into the formats consumed elsewhere in the stack. |
-| `go2_odometry` | Go2 odometry and InEKF-based state-estimation package. |
+| `go2_state_converter` | Converts Go2 lowstate and D1 servo feedback into `/imu`, `/joint_states`, and robot TF. |
 | `hq_pcot` | Central launch package for the HQ-PCOT stack. |
 | `hq_pcot_msgs` | Custom ROS 2 message definitions shared across the workspace. |
 | `intent_estimator` | Left-right, front-back, and up-down intent estimation nodes backed by ONNX models. |
@@ -161,7 +151,6 @@ export LD_LIBRARY_PATH="$ONNXRUNTIME_ROOT/lib:${LD_LIBRARY_PATH}"
 
 | Package | Description |
 | --- | --- |
-| `inekf` | Invariant EKF library dependency used by `go2_odometry`. |
 | `unitree_arm` | Unitree arm interfaces and message definitions. |
 | `unitree_ros2` | Unitree ROS 2 SDK sources and example packages that provide dependencies such as `unitree_go`. |
 

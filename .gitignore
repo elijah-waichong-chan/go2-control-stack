@@ -7,8 +7,6 @@ install/
 __pycache__/
 *.pyc
 
-/src/convex_mpc/centroidal_mpc_condensed.py
-
 # ROS 2 / colcon
 /ros2_ws/build/
 /ros2_ws/install/
@@ -17,9 +15,6 @@ rosbag2_*/
 /bag_data/
 *.mcap
 metadata.yaml
-
-# External deps / local builds
-/ros2_ws/casadi/
 
 # CMake / compiler artifacts
 CMakeFiles/

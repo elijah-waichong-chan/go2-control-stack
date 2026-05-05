@@ -13,8 +13,7 @@ from icon_lab_d1_ros2.msg import ServoFeedback
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 
-from hq_pcot_msgs.msg import ArmCommand, LocomotionCmd, LoopStatus, QDq
-from nav_msgs.msg import Odometry
+from hq_pcot_msgs.msg import ArmCommand, LocomotionCmd, LoopStatus
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Int32
 from tf2_msgs.msg import TFMessage
@@ -86,9 +85,7 @@ class TelemetryNode(Node):
         self._topic_latest_msg: Dict[str, str] = {}
         self._node_names: list[str] = []
         self._topic_names = {
-            "qdq_est": "/qdq_est",
             "imu": "/imu",
-            "odometry_filtered": "/odometry/filtered",
             "lowstate": "/lowstate",
             "locomotion_cmd": "/locomotion_cmd",
             "lowcmd": "/lowcmd",
@@ -103,11 +100,7 @@ class TelemetryNode(Node):
             "intent_up_down": "/direction_intent/up_down/label",
         }
 
-        self.create_subscription(QDq, self._topic_names["qdq_est"], self.on_qdq_est, qos)
         self.create_subscription(Imu, self._topic_names["imu"], self.on_imu, qos)
-        self.create_subscription(
-            Odometry, self._topic_names["odometry_filtered"], self.on_odometry_filtered, qos
-        )
         self.create_subscription(LowState, self._topic_names["lowstate"], self.on_lowstate, qos)
         self.create_subscription(
             LocomotionCmd, self._topic_names["locomotion_cmd"], self.on_locomotion_cmd, qos
@@ -156,12 +149,6 @@ class TelemetryNode(Node):
             qos,
         )
 
-        self.create_subscription(
-            LoopStatus,
-            "/status/state_estimator",
-            lambda m: self.on_loop_status("state_estimator", m),
-            status_qos,
-        )
         self.create_subscription(
             LoopStatus,
             "/status/loco_ctrl",
@@ -215,14 +202,8 @@ class TelemetryNode(Node):
             },
         )
 
-    def on_qdq_est(self, msg: QDq) -> None:
-        self._mark_topic("qdq_est")
-
     def on_imu(self, msg: Imu) -> None:
         self._mark_topic("imu")
-
-    def on_odometry_filtered(self, msg: Odometry) -> None:
-        self._mark_topic("odometry_filtered")
 
     def on_lowstate(self, msg: LowState) -> None:
         self._mark_topic("lowstate")
@@ -491,6 +472,55 @@ def _get_intent_estimator_status(
     return freshest_value, freshest_topic
 
 
+def _get_locomotion_status(
+    status_map: Dict[str, Tuple[object, float]], now: float, timeout: float
+) -> tuple[Dict[str, object] | None, str]:
+    standing_value = _get_fresh_status(status_map, "standing_init", now, timeout)
+    standing_code = _status_code(standing_value)
+    if standing_code in (1, 2):
+        return (
+            {
+                "source": "standing_init",
+                "value": standing_value,
+            },
+            "/status/standing_init",
+        )
+
+    loco_value = _get_fresh_status(status_map, "loco_ctrl", now, timeout)
+    if loco_value is not None:
+        return (
+            {
+                "source": "loco_ctrl",
+                "value": loco_value,
+            },
+            "/status/loco_ctrl",
+        )
+
+    return None, "/status/loco_ctrl"
+
+
+def _get_icon_lab_d1_status(
+    status_map: Dict[str, Tuple[object, float]], now: float, timeout: float
+) -> Dict[str, object]:
+    return {
+        "bridge_running": launch_process_manager.is_running("icon_lab_d1_ros2"),
+        "arm_servo_feedback": (
+            _get_fresh_status(status_map, "arm_servo_feedback", now, timeout) is True
+        ),
+    }
+
+
+def _get_state_converter_status(
+    status_map: Dict[str, Tuple[object, float]], now: float, timeout: float
+) -> Dict[str, object]:
+    return {
+        "converter_running": launch_process_manager.is_running("state_converter_stack"),
+        "joint_states": _get_fresh_status(status_map, "joint_states", now, timeout) is True,
+        "imu": _get_fresh_status(status_map, "imu", now, timeout) is True,
+        "tf": _get_fresh_status(status_map, "tf", now, timeout) is True,
+    }
+
+
 def _format_timing_ms(value: object) -> str:
     try:
         value_f = float(value)
@@ -527,8 +557,22 @@ def _module_summary(key: str, value: object) -> tuple[str, str]:
             return "info", "running sequence"
         return "error", f"idle ({standing_status})"
 
-    if key == "rl_controller":
-        loco_status = _status_code(value)
+    if key == "locomotion":
+        if not isinstance(value, dict):
+            return "error", "not running"
+        source = value.get("source")
+        source_value = value.get("value")
+        if source == "standing_init":
+            standing_status = _status_code(source_value)
+            if standing_status is None:
+                return "error", "invalid status"
+            if standing_status == 2:
+                return "warning", "stand-up waiting for /lowstate"
+            if standing_status == 1:
+                return "info", "stand-up sequence"
+            return "error", f"stand-up idle ({standing_status})"
+
+        loco_status = _status_code(source_value)
         if loco_status is None:
             return "error", "invalid status"
         if loco_status == 1:
@@ -548,6 +592,28 @@ def _module_summary(key: str, value: object) -> tuple[str, str]:
         if intent_status == 2:
             return "warning", "waiting for input"
         return "error", f"idle ({intent_status})"
+
+    if key == "icon_lab_d1_ros2":
+        if not isinstance(value, dict):
+            return "error", "not running"
+        bridge_running = bool(value.get("bridge_running"))
+        feedback_ok = bool(value.get("arm_servo_feedback"))
+        if bridge_running and feedback_ok:
+            return "success", "running"
+        if bridge_running:
+            return "warning", "waiting for topics"
+        return "error", "not running"
+
+    if key == "state_converter_stack":
+        if not isinstance(value, dict):
+            return "error", "not running"
+        converter_running = bool(value.get("converter_running"))
+        topics_ok = all(bool(value.get(topic_key)) for topic_key in ("joint_states", "imu", "tf"))
+        if converter_running and topics_ok:
+            return "success", "running"
+        if converter_running:
+            return "warning", "waiting for topics"
+        return "error", "not running"
 
     if bool(value):
         return "success", "running"
@@ -590,44 +656,82 @@ def _render_loop_status_details(topic: str, value: object) -> None:
     st.write(f"Sample count: {_format_count(value.get('sample_count'))}")
 
 
+def _render_icon_lab_d1_details(value: object) -> None:
+    st.caption("Process and required topic")
+    if not isinstance(value, dict):
+        st.caption("No process status available.")
+        return
+
+    st.write(f"ICON Lab D1 ROS2: `{'running' if value.get('bridge_running') else 'stopped'}`")
+    st.write(
+        f"/arm/servo_feedback: `{'fresh' if value.get('arm_servo_feedback') else 'missing'}`"
+    )
+
+
+def _render_state_converter_details(value: object) -> None:
+    st.caption("Process and required topics")
+    if not isinstance(value, dict):
+        st.caption("No process status available.")
+        return
+
+    st.write(
+        f"State Converter: `{'running' if value.get('converter_running') else 'stopped'}`"
+    )
+    st.write(f"/joint_states: `{'fresh' if value.get('joint_states') else 'missing'}`")
+    st.write(f"/imu: `{'fresh' if value.get('imu') else 'missing'}`")
+    st.write(f"/tf: `{'fresh' if value.get('tf') else 'missing'}`")
+
+
 def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
     now = time.monotonic()
     timeout = float(timeout_s)
     status_map = snapshot["status"]
 
-    labels = [
-        ("standing_init", "Standing Init"),
-        ("rl_controller", "RL Controller"),
-        ("intent_estimator", "Intent Estimator"),
-    ]
-
     intent_estimator_value, intent_estimator_topic = _get_intent_estimator_status(
         status_map, now, timeout
     )
+    locomotion_value, locomotion_topic = _get_locomotion_status(status_map, now, timeout)
+    icon_lab_d1_value = _get_icon_lab_d1_status(status_map, now, timeout)
+    state_converter_value = _get_state_converter_status(status_map, now, timeout)
 
     status_view = {
-        "standing_init": _get_fresh_status(status_map, "standing_init", now, timeout),
-        "rl_controller": _get_fresh_status(status_map, "loco_ctrl", now, timeout),
+        "icon_lab_d1_ros2": icon_lab_d1_value,
+        "state_converter_stack": state_converter_value,
+        "locomotion": locomotion_value,
         "intent_estimator": intent_estimator_value,
     }
     status_topics = {
-        "standing_init": "/status/standing_init",
-        "rl_controller": "/status/loco_ctrl",
+        "icon_lab_d1_ros2": "process + /arm/servo_feedback",
+        "state_converter_stack": "process + /joint_states + /imu + /tf",
+        "locomotion": locomotion_topic,
         "intent_estimator": (
             intent_estimator_topic
             or next(iter(_INTENT_ESTIMATORS.values()))["status_topic"]
         ),
     }
 
-    cols = st.columns(len(labels))
-    for idx, (key, label) in enumerate(labels):
-        with cols[idx]:
-            val = status_view.get(key)
-            severity, summary = _module_summary(key, val)
-            _render_summary(label, severity, summary)
-
-            with st.expander("Details", expanded=False):
+    def _render_module_card(key: str, label: str) -> None:
+        val = status_view.get(key)
+        severity, summary = _module_summary(key, val)
+        _render_summary(label, severity, summary)
+        with st.expander("Details", expanded=False):
+            if key == "icon_lab_d1_ros2":
+                _render_icon_lab_d1_details(val)
+            elif key == "state_converter_stack":
+                _render_state_converter_details(val)
+            elif key == "locomotion" and isinstance(val, dict):
+                _render_loop_status_details(status_topics[key], val.get("value"))
+            else:
                 _render_loop_status_details(status_topics[key], val)
+
+    cols = st.columns(3)
+    with cols[0]:
+        _render_module_card("icon_lab_d1_ros2", "D1 ROS2")
+        _render_module_card("state_converter_stack", "State Converter")
+    with cols[1]:
+        _render_module_card("locomotion", "Locomotion")
+    with cols[2]:
+        _render_module_card("intent_estimator", "Intent Estimator")
 
 
 def _style_sidebar_buttons() -> None:
@@ -951,25 +1055,42 @@ def _render_sidebar(node: TelemetryNode) -> None:
             st.info(msg)
         else:
             st.warning(msg)
-    icon_lab_d1_label = (
-        "Stop Icon Lab D1 ROS2"
-        if icon_lab_d1_active
-        else "Start Icon Lab D1 ROS2"
+    d1_state_stack_active = icon_lab_d1_active or state_converter_active
+    d1_state_stack_label = (
+        "Stop D1 ROS2 + State Converter"
+        if d1_state_stack_active
+        else "Start D1 ROS2 + State Converter"
     )
     if st.button(
-        icon_lab_d1_label,
-        key="toggle_icon_lab_d1_ros2",
+        d1_state_stack_label,
+        key="toggle_d1_state_stack",
         use_container_width=True,
-        type="primary" if icon_lab_d1_active else "secondary",
+        type="primary" if d1_state_stack_active else "secondary",
     ):
-        if icon_lab_d1_active:
-            ok, msg = launch_process_manager.stop_launch("icon_lab_d1_ros2")
+        messages = []
+        ok = True
+        if d1_state_stack_active:
+            if state_converter_active:
+                stop_ok, stop_msg = launch_process_manager.stop_state_converter_stack()
+                messages.append(stop_msg)
+                ok = ok and stop_ok
+            if icon_lab_d1_active:
+                stop_ok, stop_msg = launch_process_manager.stop_launch("icon_lab_d1_ros2")
+                messages.append(stop_msg)
+                ok = ok and stop_ok
         else:
-            ok, msg = launch_process_manager.start_launch(
+            start_ok, start_msg = launch_process_manager.start_launch(
                 "icon_lab_d1_ros2",
                 "icon_lab_d1_ros2",
                 "icon_lab_d1_ros2.launch.py",
             )
+            messages.append(start_msg)
+            ok = ok and start_ok
+            if ok:
+                start_ok, start_msg = launch_process_manager.start_state_converter_stack()
+                messages.append(start_msg)
+                ok = ok and start_ok
+        msg = "; ".join(messages)
         if ok:
             st.info(msg)
         else:
@@ -1043,23 +1164,6 @@ def _render_sidebar(node: TelemetryNode) -> None:
             value=enable_up_down_estimator,
             key="ctrl_enable_up_down_estimator",
         )
-    state_converter_label = (
-        "Stop State Converter" if state_converter_active else "Start State Converter"
-    )
-    if st.button(
-        state_converter_label,
-        key="toggle_state_converter",
-        use_container_width=True,
-        type="primary" if state_converter_active else "secondary",
-    ):
-        if state_converter_active:
-            ok, msg = launch_process_manager.stop_state_converter_stack()
-        else:
-            ok, msg = launch_process_manager.start_state_converter_stack()
-        if ok:
-            st.info(msg)
-        else:
-            st.warning(msg)
     arm_controller_label = (
         "Stop Arm Controller" if arm_controller_active else "Start Arm Controller"
     )
@@ -1195,13 +1299,11 @@ def _render_dashboard(node: TelemetryNode) -> None:
             ],
         ),
         (
-            "Estimator",
+            "State Conversion",
             [
                 ("imu", "imu"),
-                ("odometry_filtered", "odometry_filtered"),
                 ("joint_states", "joint_states"),
                 ("tf", "tf"),
-                ("qdq_est", "qdq_est"),
             ],
         ),
         (
