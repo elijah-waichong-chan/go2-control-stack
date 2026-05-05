@@ -57,6 +57,9 @@ def _get_ros_runtimes() -> Dict[
     return {}
 
 
+_ROS_RUNTIME_STATE: Dict[str, Tuple[str, str | None]] = {}
+
+
 class TelemetryNode(Node):
     def __init__(self, node_name: str) -> None:
         super().__init__(node_name)
@@ -313,6 +316,7 @@ def _register_ros_runtime(
 ) -> None:
     with _ROS_RUNTIME_LOCK:
         _get_ros_runtimes()[node_name] = (node, executor, thread)
+        _ROS_RUNTIME_STATE[node_name] = ("ready", None)
 
 
 def _get_registered_ros_runtime(
@@ -325,6 +329,7 @@ def _get_registered_ros_runtime(
 def _shutdown_ros_runtime(node_name: str) -> bool:
     with _ROS_RUNTIME_LOCK:
         runtime = _get_ros_runtimes().pop(node_name, None)
+        _ROS_RUNTIME_STATE[node_name] = ("idle", None)
 
     if runtime is None:
         return False
@@ -386,34 +391,74 @@ def _collect_other_visible_ros_nodes(
     return other_nodes
 
 
-def get_ros_node() -> TelemetryNode:
+def _empty_snapshot() -> Dict[str, object]:
+    return {
+        "status": {},
+        "topic_available": {},
+        "topic_rate": {},
+        "topic_latest_msg": {},
+        "topic_names": {},
+        "node_names": [],
+        "status_timeout_s": 3.0,
+    }
+
+
+def _get_ros_runtime_state(node_name: str) -> Tuple[str, str | None]:
+    with _ROS_RUNTIME_LOCK:
+        if node_name in _get_ros_runtimes():
+            return "ready", None
+        return _ROS_RUNTIME_STATE.get(node_name, ("idle", None))
+
+
+def _bootstrap_ros_runtime(node_name: str) -> None:
     try:
         if not rclpy.ok():
             rclpy.init(args=None)
     except RuntimeError:
         # rclpy may already be initialized in this process
         pass
-
-    node_name = _PRIMARY_ROS_NODE_NAME
-    st.session_state["ros_node_name"] = node_name
     runtime = _get_registered_ros_runtime(node_name)
     if runtime is not None:
-        node, executor, thread = runtime
-        st.session_state["ros_executor"] = executor
-        st.session_state["ros_spin_thread"] = thread
-        st.session_state["ros_node"] = node
-        return node
+        return
+    try:
+        node = TelemetryNode(node_name)
+        executor = rclpy.executors.SingleThreadedExecutor()
+        executor.add_node(node)
+        thread = threading.Thread(target=executor.spin, daemon=True)
+        thread.start()
+        _register_ros_runtime(node_name, node, executor, thread)
+    except Exception as exc:
+        with _ROS_RUNTIME_LOCK:
+            _ROS_RUNTIME_STATE[node_name] = ("error", str(exc))
 
-    node = TelemetryNode(node_name)
-    executor = rclpy.executors.SingleThreadedExecutor()
-    executor.add_node(node)
-    thread = threading.Thread(target=executor.spin, daemon=True)
+
+def _start_ros_runtime_async(node_name: str) -> None:
+    state, _message = _get_ros_runtime_state(node_name)
+    if state in {"pending", "ready"}:
+        return
+    with _ROS_RUNTIME_LOCK:
+        if node_name in _get_ros_runtimes():
+            _ROS_RUNTIME_STATE[node_name] = ("ready", None)
+            return
+        current_state = _ROS_RUNTIME_STATE.get(node_name, ("idle", None))[0]
+        if current_state == "pending":
+            return
+        _ROS_RUNTIME_STATE[node_name] = ("pending", None)
+    thread = threading.Thread(
+        target=_bootstrap_ros_runtime,
+        args=(node_name,),
+        daemon=True,
+    )
     thread.start()
-    _register_ros_runtime(node_name, node, executor, thread)
-    st.session_state["ros_executor"] = executor
-    st.session_state["ros_spin_thread"] = thread
-    st.session_state["ros_node"] = node
-    return node
+
+
+def _get_dashboard_snapshot() -> Dict[str, object]:
+    node_name = st.session_state.get("ros_node_name", _PRIMARY_ROS_NODE_NAME)
+    runtime = _get_registered_ros_runtime(node_name)
+    if runtime is None:
+        return _empty_snapshot()
+    node, _executor, _thread = runtime
+    return node.snapshot()
 
 
 def _get_fresh_status(status_map: Dict[str, Tuple[object, float]], key: str, now: float, timeout: float):
@@ -987,9 +1032,9 @@ def _rosbag_topic_groups(default_topics: list[str]) -> Dict[str, list[str]]:
     }
 
 
-def _render_sidebar(node: TelemetryNode) -> None:
-    snapshot = node.snapshot()
-    current_node_name = st.session_state.get("ros_node_name", node.get_name())
+def _render_sidebar() -> None:
+    snapshot = _get_dashboard_snapshot()
+    current_node_name = st.session_state.get("ros_node_name", _PRIMARY_ROS_NODE_NAME)
 
     st.header("Settings")
     status_map = snapshot["status"]
@@ -1337,8 +1382,8 @@ def _render_sidebar(node: TelemetryNode) -> None:
     _style_sidebar_buttons()
 
 
-def _render_dashboard(node: TelemetryNode) -> None:
-    snapshot = node.snapshot()
+def _render_dashboard() -> None:
+    snapshot = _get_dashboard_snapshot()
 
     st.subheader("Modules")
     render_status(snapshot, snapshot["status_timeout_s"])
@@ -1534,10 +1579,17 @@ def main() -> None:
     st.set_page_config(layout="wide", page_title="Go2 Telemetry")
     st.title("Go2 Telemetry Dashboard")
 
-    node = get_ros_node()
+    node_name = _PRIMARY_ROS_NODE_NAME
+    st.session_state["ros_node_name"] = node_name
+    _start_ros_runtime_async(node_name)
+    runtime_state, runtime_message = _get_ros_runtime_state(node_name)
     with st.sidebar:
-        _render_sidebar(node)
-    _render_dashboard(node)
+        _render_sidebar()
+    if runtime_state == "pending":
+        st.caption("Initializing ROS runtime...")
+    elif runtime_state == "error":
+        st.error(f"ROS runtime failed to initialize: {runtime_message}")
+    _render_dashboard()
 
 
 if __name__ == "__main__":
