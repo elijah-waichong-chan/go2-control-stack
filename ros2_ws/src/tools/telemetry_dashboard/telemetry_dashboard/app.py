@@ -9,7 +9,7 @@ from typing import Deque, Dict, Tuple
 import streamlit as st
 
 import rclpy
-from icon_lab_d1_ros2.msg import ServoFeedback
+from icon_lab_d1_ros2.msg import ServoCommand, ServoFeedback
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 
@@ -91,6 +91,7 @@ class TelemetryNode(Node):
             "joint_states": "/joint_states",
             "tf": "/tf",
             "arm_servo_feedback": "/arm/servo_feedback",
+            "arm_servo_command": "/arm/servo_command",
             "arm_command_state": "/arm/commanded_angles",
             "intent_forward_backward": "/direction_intent/front_back/label",
             "intent_left_right": "/direction_intent/left_right/label",
@@ -113,6 +114,12 @@ class TelemetryNode(Node):
             ServoFeedback,
             self._topic_names["arm_servo_feedback"],
             self.on_arm_servo_feedback,
+            qos,
+        )
+        self.create_subscription(
+            ServoCommand,
+            self._topic_names["arm_servo_command"],
+            self.on_arm_servo_command,
             qos,
         )
         self.create_subscription(
@@ -213,6 +220,9 @@ class TelemetryNode(Node):
 
     def on_arm_servo_feedback(self, msg: ServoFeedback) -> None:
         self._mark_topic("arm_servo_feedback")
+
+    def on_arm_servo_command(self, msg: ServoCommand) -> None:
+        self._mark_topic("arm_servo_command")
 
     def on_arm_command_state(self, msg: ArmCommand) -> None:
         self._mark_topic("arm_command_state")
@@ -939,6 +949,44 @@ def _render_up_down_intent_pad(
     )
 
 
+def _rosbag_topic_groups(default_topics: list[str]) -> Dict[str, list[str]]:
+    groups = {
+        "Unitree Go2": [
+            "/lowstate",
+            "/lowcmd",
+        ],
+        "Unitree D1 Arm": [
+            "/arm_task",
+            "/arm/z_reference",
+            "/arm/commanded_angles",
+            "/arm/servo_feedback",
+            "/arm/servo_command",
+        ],
+        "HQ-PCoT": [
+            "/data/push_event",
+            "/locomotion_cmd",
+            "/joint_states",
+            "/robot_description",
+            "/tf",
+            "/tf_static",
+        ],
+        "Intent": [
+            "/direction_intent/front_back/label",
+            "/direction_intent/left_right/label",
+            "/direction_intent/left_right/scores_raw",
+            "/direction_intent/left_right/scores_smoothed",
+            "/direction_intent/up_down/label",
+            "/direction_intent/up_down/scores_raw",
+            "/direction_intent/up_down/scores_smoothed",
+        ],
+    }
+    valid_topics = set(default_topics)
+    return {
+        name: [topic for topic in topics if topic in valid_topics]
+        for name, topics in groups.items()
+    }
+
+
 def _render_sidebar(node: TelemetryNode) -> None:
     snapshot = node.snapshot()
     current_node_name = st.session_state.get("ros_node_name", node.get_name())
@@ -994,6 +1042,7 @@ def _render_sidebar(node: TelemetryNode) -> None:
     if enable_up_down_estimator:
         selected_direction_estimators.append("up_down")
 
+    st.subheader("Core Runtime")
     if st.button(
         control_label,
         key="toggle_ctrl",
@@ -1021,25 +1070,6 @@ def _render_sidebar(node: TelemetryNode) -> None:
             value=enable_wireless_cmd_bridge,
             key="ctrl_enable_wireless_cmd_bridge",
         )
-    autonomy_label = "Stop Autonomy" if autonomy_active else "Start Autonomy"
-    if st.button(
-        autonomy_label,
-        key="toggle_autonomy",
-        use_container_width=True,
-        type="primary" if autonomy_active else "secondary",
-    ):
-        if autonomy_active:
-            ok, msg = launch_process_manager.stop_launch("autonomy")
-        else:
-            ok, msg = launch_process_manager.start_node(
-                "autonomy",
-                "coordination_module",
-                "intent_command_coordinator",
-            )
-        if ok:
-            st.info(msg)
-        else:
-            st.warning(msg)
     d1_state_stack_active = icon_lab_d1_active or state_converter_active
     d1_state_stack_label = (
         "Stop D1 ROS2 + State Converter"
@@ -1080,6 +1110,48 @@ def _render_sidebar(node: TelemetryNode) -> None:
             st.info(msg)
         else:
             st.warning(msg)
+    arm_controller_label = (
+        "Stop Arm Controller" if arm_controller_active else "Start Arm Controller"
+    )
+    if st.button(
+        arm_controller_label,
+        key="toggle_arm_controller",
+        use_container_width=True,
+        type="primary" if arm_controller_active else "secondary",
+    ):
+        if arm_controller_active:
+            ok, msg = launch_process_manager.stop_arm_controller()
+        else:
+            ok, msg = launch_process_manager.start_arm_controller_mode("pink_mode_switch")
+        if ok:
+            st.info(msg)
+        else:
+            st.warning(msg)
+    if active_arm_controller_mode in arm_controller_mode_labels:
+        st.caption(
+            "Active arm controller: "
+            + arm_controller_mode_labels[active_arm_controller_mode]
+        )
+    autonomy_label = "Stop Autonomy" if autonomy_active else "Start Autonomy"
+    if st.button(
+        autonomy_label,
+        key="toggle_autonomy",
+        use_container_width=True,
+        type="primary" if autonomy_active else "secondary",
+    ):
+        if autonomy_active:
+            ok, msg = launch_process_manager.stop_launch("autonomy")
+        else:
+            ok, msg = launch_process_manager.start_node(
+                "autonomy",
+                "coordination_module",
+                "intent_command_coordinator",
+            )
+        if ok:
+            st.info(msg)
+        else:
+            st.warning(msg)
+    st.subheader("Intent")
     if active_intent_estimator_modes:
         active_labels = ", ".join(
             _INTENT_ESTIMATORS[mode]["label"] for mode in active_intent_estimator_modes
@@ -1149,28 +1221,7 @@ def _render_sidebar(node: TelemetryNode) -> None:
             value=enable_up_down_estimator,
             key="ctrl_enable_up_down_estimator",
         )
-    arm_controller_label = (
-        "Stop Arm Controller" if arm_controller_active else "Start Arm Controller"
-    )
-    if st.button(
-        arm_controller_label,
-        key="toggle_arm_controller",
-        use_container_width=True,
-        type="primary" if arm_controller_active else "secondary",
-    ):
-        if arm_controller_active:
-            ok, msg = launch_process_manager.stop_arm_controller()
-        else:
-            ok, msg = launch_process_manager.start_arm_controller_mode("pink_mode_switch")
-        if ok:
-            st.info(msg)
-        else:
-            st.warning(msg)
-    if active_arm_controller_mode in arm_controller_mode_labels:
-        st.caption(
-            "Active arm controller: "
-            + arm_controller_mode_labels[active_arm_controller_mode]
-        )
+    st.subheader("Tools")
     foxglove_label = (
         "Stop Foxglove Bridge"
         if foxglove_active
@@ -1196,24 +1247,47 @@ def _render_sidebar(node: TelemetryNode) -> None:
         else "Start Rosbag Recording"
     )
     default_rosbag_topics = list(launch_process_manager.ROSBAG_TOPICS)
+    topic_groups = _rosbag_topic_groups(default_rosbag_topics)
+    group_names = list(topic_groups.keys())
     valid_rosbag_topics = set(default_rosbag_topics)
-    if "rosbag_topics" in st.session_state:
-        selected_default_rosbag_topics = [
+    if "rosbag_topic_groups" not in st.session_state:
+        st.session_state["rosbag_topic_groups"] = group_names
+    else:
+        st.session_state["rosbag_topic_groups"] = [
+            group
+            for group in st.session_state["rosbag_topic_groups"]
+            if group in topic_groups
+        ]
+    if "rosbag_topics_custom" not in st.session_state:
+        st.session_state["rosbag_topics_custom"] = []
+    else:
+        st.session_state["rosbag_topics_custom"] = [
             topic
-            for topic in st.session_state["rosbag_topics"]
+            for topic in st.session_state["rosbag_topics_custom"]
             if topic in valid_rosbag_topics
         ]
-        st.session_state["rosbag_topics"] = selected_default_rosbag_topics
-    else:
-        selected_default_rosbag_topics = default_rosbag_topics
-    selected_rosbag_topics = st.multiselect(
-        "Rosbag Topics",
-        options=default_rosbag_topics,
-        default=selected_default_rosbag_topics,
-        key="rosbag_topics",
+    selected_group_names = st.multiselect(
+        "Rosbag Topic Groups",
+        options=group_names,
+        key="rosbag_topic_groups",
         disabled=rosbag_active,
-        help="Choose which topics to record when starting rosbag. Defaults to all topics.",
+        help="Choose grouped topic presets for rosbag recording.",
     )
+    with st.expander("Advanced Topic Selection", expanded=False):
+        st.multiselect(
+            "Additional Topics",
+            options=default_rosbag_topics,
+            key="rosbag_topics_custom",
+            disabled=rosbag_active,
+            help="Add individual topics on top of the selected groups.",
+        )
+    selected_topic_set = set(st.session_state["rosbag_topics_custom"])
+    for group_name in selected_group_names:
+        selected_topic_set.update(topic_groups[group_name])
+    selected_rosbag_topics = [
+        topic for topic in default_rosbag_topics if topic in selected_topic_set
+    ]
+    st.caption(f"Rosbag topics selected: {len(selected_rosbag_topics)}")
     if rosbag_active:
         st.caption("Rosbag topic selection is locked while recording is running.")
     if st.button(
@@ -1225,13 +1299,18 @@ def _render_sidebar(node: TelemetryNode) -> None:
         if rosbag_active:
             ok, msg = launch_process_manager.stop_launch("rosbag_recording")
         else:
-            ok, msg = launch_process_manager.start_rosbag_recording(
-                selected_rosbag_topics
-            )
+            if not selected_rosbag_topics:
+                ok = False
+                msg = "select at least one rosbag topic group or individual topic"
+            else:
+                ok, msg = launch_process_manager.start_rosbag_recording(
+                    selected_rosbag_topics
+                )
         if ok:
             st.info(msg)
         else:
             st.warning(msg)
+    st.subheader("Danger Zone")
     st.caption("Danger zone")
     if st.button(
         "Destroy All Other ROS Nodes",
@@ -1276,31 +1355,27 @@ def _render_dashboard(node: TelemetryNode) -> None:
 
     topic_groups = [
         (
-            "Control",
+            "Unitree Go2",
             [
                 ("lowstate", "lowstate"),
-                ("locomotion_cmd", "locomotion_cmd"),
                 ("lowcmd", "lowcmd"),
             ],
         ),
         (
-            "State Conversion",
-            [
-                ("imu", "imu"),
-                ("joint_states", "joint_states"),
-                ("tf", "tf"),
-            ],
-        ),
-        (
-            "Arm",
+            "Unitree D1 Arm",
             [
                 ("arm_servo_feedback", "arm_servo_feedback"),
+                ("arm_servo_command", "arm_servo_command"),
                 ("arm_command_state", "arm_command_state"),
             ],
         ),
         (
-            "Intent",
+            "HQ-PCoT",
             [
+                ("locomotion_cmd", "locomotion_cmd"),
+                ("imu", "imu"),
+                ("joint_states", "joint_states"),
+                ("tf", "tf"),
                 ("intent_forward_backward", "intent_forward_backward"),
                 ("intent_left_right", "intent_left_right"),
                 ("intent_up_down", "intent_up_down"),
