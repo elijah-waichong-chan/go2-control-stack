@@ -27,6 +27,18 @@ _ARM_CONTROLLER_MODES = {
         ),
     },
 }
+_COORDINATION_MODULE_MODES = {
+    "autonomous": {
+        "process_name": "coordination_module_autonomous",
+        "executable": "autonomous_coordinator",
+        "success_message": "started coordination_module autonomous_coordinator",
+    },
+    "teleop": {
+        "process_name": "coordination_module_teleop",
+        "executable": "teleop_coordinator",
+        "success_message": "started coordination_module teleop_coordinator",
+    },
+}
 ROSBAG_TOPICS: tuple[str, ...] = (
     "/data/push_event",
     "/lowstate",
@@ -268,6 +280,30 @@ def start_arm_controller_mode(mode: str) -> Tuple[bool, str]:
         )
 
 
+def start_coordination_module_mode(mode: str) -> Tuple[bool, str]:
+    with _LOCK:
+        config = _COORDINATION_MODULE_MODES.get(mode)
+        if config is None:
+            return False, f"unknown coordination module mode: {mode}"
+
+        process_name = str(config["process_name"])
+        for other_config in _COORDINATION_MODULE_MODES.values():
+            _cleanup_stale(str(other_config["process_name"]))
+        active_names = [
+            str(other_config["process_name"])
+            for other_config in _COORDINATION_MODULE_MODES.values()
+            if str(other_config["process_name"]) in _PROCESSES
+        ]
+        if active_names:
+            return False, f"coordination module already running: {', '.join(active_names)}"
+
+        return _start_process(
+            process_name,
+            ["ros2", "run", "coordination_module", str(config["executable"])],
+            str(config["success_message"]),
+        )
+
+
 def stop_launch(name: str) -> Tuple[bool, str]:
     with _LOCK:
         _cleanup_stale(name)
@@ -323,6 +359,20 @@ def stop_arm_controller() -> Tuple[bool, str]:
     return True, "; ".join(results)
 
 
+def stop_coordination_module() -> Tuple[bool, str]:
+    results: list[str] = []
+    any_running = False
+    for config in _COORDINATION_MODULE_MODES.values():
+        ok, msg = stop_launch(str(config["process_name"]))
+        if ok:
+            any_running = True
+            results.append(msg)
+
+    if not any_running:
+        return False, "coordination module not running"
+    return True, "; ".join(results)
+
+
 def get_active_arm_controller_mode() -> str | None:
     with _LOCK:
         for mode, config in _ARM_CONTROLLER_MODES.items():
@@ -335,6 +385,20 @@ def get_active_arm_controller_mode() -> str | None:
 
 def is_arm_controller_running() -> bool:
     return get_active_arm_controller_mode() is not None
+
+
+def get_active_coordination_module_mode() -> str | None:
+    with _LOCK:
+        for mode, config in _COORDINATION_MODULE_MODES.items():
+            process_name = str(config["process_name"])
+            _cleanup_stale(process_name)
+            if process_name in _PROCESSES:
+                return mode
+    return None
+
+
+def is_coordination_module_running() -> bool:
+    return get_active_coordination_module_mode() is not None
 
 
 def _normalize_node_name(name: str) -> str:
@@ -420,7 +484,6 @@ def is_running(name: str) -> bool:
 def stop_all() -> None:
     for name in (
         "control_stack",
-        "autonomy",
         "front_back_estimator",
         "left_right_estimator",
         "up_down_estimator",
@@ -431,3 +494,5 @@ def stop_all() -> None:
         "arm_pink_controller_mode_switch",
     ):
         stop_launch(name)
+    for config in _COORDINATION_MODULE_MODES.values():
+        stop_launch(str(config["process_name"]))

@@ -1,19 +1,55 @@
 from __future__ import annotations
 
+from collections import deque
 import math
 from enum import Enum
+import time
 
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import (
+    QoSDurabilityPolicy,
+    QoSHistoryPolicy,
+    QoSProfile,
+    QoSReliabilityPolicy,
+)
 from std_msgs.msg import Bool, Float32, String
 
-from hq_pcot_msgs.msg import ArmTask
+from hq_pcot_msgs.msg import ArmTask, LoopStatus
 from icon_lab_d1_ros2.msg import ServoCommand, ServoFeedback
 
 
 SERVO_COUNT = 7
 ARM_JOINT_COUNT = 6
+
+
+def _make_loop_status(
+    status_code: int,
+    avg_loop_ms: float = -1.0,
+    p99_loop_ms: float = -1.0,
+    max_loop_ms: float = -1.0,
+    budget_ms: float = -1.0,
+    deadline_miss_count: int = -1,
+    sample_count: int = -1,
+) -> LoopStatus:
+    msg = LoopStatus()
+    msg.status = int(status_code)
+    msg.avg_loop_ms = float(avg_loop_ms)
+    msg.p99_loop_ms = float(p99_loop_ms)
+    msg.max_loop_ms = float(max_loop_ms)
+    msg.budget_ms = float(budget_ms)
+    msg.deadline_miss_count = int(deadline_miss_count)
+    msg.sample_count = int(sample_count)
+    return msg
+
+
+def _percentile99(samples: deque[float]) -> float:
+    if not samples:
+        return -1.0
+    ordered = sorted(samples)
+    idx = max(0, math.ceil(0.99 * len(ordered)) - 1)
+    return float(ordered[min(idx, len(ordered) - 1)])
 
 
 class ControllerMode(str, Enum):
@@ -22,6 +58,9 @@ class ControllerMode(str, Enum):
 
 
 class D1PinkModeSwitchController(Node):
+    STATUS_RUNNING = 1
+    STATUS_WAITING_FOR_TOPICS = 2
+    STATUS_STARTUP = 3
     DEFAULT_STARTUP_POSE_DEG = [90.0, -10.0, 10.0, 5.0, -3.0, 0.0]
     DEFAULT_FRONT_BACK_POSE_DEG = [math.nan, math.nan, math.nan, math.nan, math.nan, 0.0]
     DEFAULT_UP_DOWN_POSE_DEG = [math.nan, math.nan, math.nan, 0.0, math.nan, 90.0]
@@ -49,6 +88,8 @@ class D1PinkModeSwitchController(Node):
         self.declare_parameter(
             "startup_complete_topic", "/d1_pink/mode_switch_startup_complete"
         )
+        self.declare_parameter("status_topic", "/status/arm_controller")
+        self.declare_parameter("status_hz", 10.0)
         self.declare_parameter("control_rate_hz", 20.0)
         self.declare_parameter("startup_pose_deg", self.DEFAULT_STARTUP_POSE_DEG)
         self.declare_parameter("position_tolerance_deg", 2.0)
@@ -109,6 +150,8 @@ class D1PinkModeSwitchController(Node):
         z_ref_enabled_topic = str(self.get_parameter("z_ref_enabled_topic").value)
         z_velocity_topic = str(self.get_parameter("z_velocity_topic").value)
         startup_complete_topic = str(self.get_parameter("startup_complete_topic").value)
+        self.status_topic = str(self.get_parameter("status_topic").value)
+        self.status_hz = max(1.0, float(self.get_parameter("status_hz").value))
         self.control_rate_hz = float(self.get_parameter("control_rate_hz").value)
         self.startup_pose_deg = self._read_pose_parameter("startup_pose_deg")
         self.position_tolerance_deg = float(
@@ -180,6 +223,8 @@ class D1PinkModeSwitchController(Node):
             raise ValueError("up_down_z_command_velocity_mps must be >= 0")
         if self.control_rate_hz <= 0.0:
             raise ValueError("control_rate_hz must be > 0")
+        self.loop_budget_ms = 1000.0 / max(self.control_rate_hz, 1.0)
+        self.loop_stats_window = max(100, int(self.control_rate_hz * 10.0))
 
         self.feedback_sub = self.create_subscription(
             ServoFeedback,
@@ -198,6 +243,13 @@ class D1PinkModeSwitchController(Node):
         self.z_ref_enabled_pub = self.create_publisher(Bool, z_ref_enabled_topic, 10)
         self.z_velocity_pub = self.create_publisher(Float32, z_velocity_topic, 10)
         self.startup_complete_pub = self.create_publisher(Bool, startup_complete_topic, 10)
+        status_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.status_pub = self.create_publisher(LoopStatus, self.status_topic, status_qos)
 
         self.latest_feedback_deg: np.ndarray | None = None
         self.latest_current_ma: np.ndarray | None = None
@@ -215,8 +267,15 @@ class D1PinkModeSwitchController(Node):
         self.pending_motion_description: str | None = None
         self.z_ref_enabled = False
         self.last_commanded_z_velocity_mps = 0.0
+        self.status_code = self.STATUS_WAITING_FOR_TOPICS
+        self.waiting_on: str | None = None
+        self.running_logged = False
+        self.loop_times_ms: deque[float] = deque(maxlen=self.loop_stats_window)
+        self.deadline_flags: deque[int] = deque(maxlen=self.loop_stats_window)
 
         self.timer = self.create_timer(1.0 / self.control_rate_hz, self._on_timer)
+        self.status_timer = self.create_timer(1.0 / self.status_hz, self._on_status_timer)
+        self._update_status()
 
         self.get_logger().info(
             "Pink mode switch controller running on "
@@ -239,6 +298,70 @@ class D1PinkModeSwitchController(Node):
             f"up_down z command velocity={self.up_down_z_command_velocity_mps:.3f} m/s, "
             f"startup complete topic={startup_complete_topic}"
         )
+
+    def _set_status(self, status_code: int) -> None:
+        status_code = int(status_code)
+        if status_code == self.status_code:
+            return
+        self.status_code = status_code
+        self._publish_status()
+
+    def _record_loop_time_ms(self, loop_time_ms: float) -> None:
+        self.loop_times_ms.append(float(loop_time_ms))
+        self.deadline_flags.append(1 if loop_time_ms > self.loop_budget_ms else 0)
+
+    def _publish_status(self) -> None:
+        if not self.loop_times_ms:
+            self.status_pub.publish(
+                _make_loop_status(
+                    self.status_code,
+                    budget_ms=self.loop_budget_ms,
+                )
+            )
+            return
+
+        max_loop_ms = max(self.loop_times_ms)
+        avg_loop_ms = sum(self.loop_times_ms) / len(self.loop_times_ms)
+        p99_loop_ms = _percentile99(self.loop_times_ms)
+        deadline_miss_count = sum(self.deadline_flags)
+        sample_count = len(self.loop_times_ms)
+        self.status_pub.publish(
+            _make_loop_status(
+                self.status_code,
+                avg_loop_ms=avg_loop_ms,
+                p99_loop_ms=p99_loop_ms,
+                max_loop_ms=max_loop_ms,
+                budget_ms=self.loop_budget_ms,
+                deadline_miss_count=deadline_miss_count,
+                sample_count=sample_count,
+            )
+        )
+
+    def _on_status_timer(self) -> None:
+        self._publish_status()
+
+    def _update_status(self) -> None:
+        if (
+            self.latest_feedback_deg is None
+            or self.latest_current_ma is None
+            or self.latest_velocity_deg_s is None
+        ):
+            if self.waiting_on != "feedback":
+                self.get_logger().info("d1_pink_mode_switch_controller waiting for /arm/servo_feedback...")
+                self.waiting_on = "feedback"
+            self._set_status(self.STATUS_WAITING_FOR_TOPICS)
+            return
+
+        if not self.startup_complete:
+            self.waiting_on = None
+            self._set_status(self.STATUS_STARTUP)
+            return
+
+        self.waiting_on = None
+        self._set_status(self.STATUS_RUNNING)
+        if not self.running_logged:
+            self.get_logger().info("d1_pink_mode_switch_controller running")
+            self.running_logged = True
 
     def _read_pose_parameter(self, name: str) -> np.ndarray:
         values = np.asarray(self.get_parameter(name).value, dtype=float).reshape(-1)
@@ -291,6 +414,7 @@ class D1PinkModeSwitchController(Node):
         self.latest_feedback_deg = angle_values[:ARM_JOINT_COUNT].copy()
         self.latest_current_ma = current_values[:ARM_JOINT_COUNT].copy()
         self.latest_velocity_deg_s = velocity_values[:ARM_JOINT_COUNT].copy()
+        self._update_status()
 
     def _handle_arm_task(self, msg: ArmTask) -> None:
         if self.current_mode != ControllerMode.UP_DOWN or not self.z_ref_enabled:
@@ -367,94 +491,106 @@ class D1PinkModeSwitchController(Node):
         self.startup_complete_pub.publish(msg)
 
     def _on_timer(self) -> None:
-        if (
-            self.latest_feedback_deg is None
-            or self.latest_current_ma is None
-            or self.latest_velocity_deg_s is None
-        ):
-            return
-
-        self._publish_startup_complete()
-
-        if not self.startup_started:
-            self.startup_started = True
-            self._set_z_ref_enabled(False)
-            self.commanded_arm_pose_deg = self.startup_pose_deg.copy()
-            self.pending_motion_target_deg = self.commanded_arm_pose_deg.copy()
-            self.pending_motion_mask = np.ones(ARM_JOINT_COUNT, dtype=bool)
-            self.pending_motion_description = "startup pose"
-            self._publish_pose_command(
-                self.commanded_arm_pose_deg,
-                velocity_deg_s=self.startup_velocity_deg_s,
-            )
-            self.get_logger().info(
-                "Published startup pose and waiting for position convergence "
-                f"within {self.position_tolerance_deg:.1f} deg before mode switching"
-            )
-            return
-
-        if not self.startup_complete:
-            if not self._target_reached(
-                self.pending_motion_target_deg,
-                self.pending_motion_mask,
+        loop_start = time.perf_counter()
+        try:
+            if (
+                self.latest_feedback_deg is None
+                or self.latest_current_ma is None
+                or self.latest_velocity_deg_s is None
             ):
+                self._update_status()
                 return
 
-            self.startup_complete = True
-            self._clear_pending_motion()
-            self.current_mode = self._infer_mode(self.latest_feedback_deg)
-            self._publish_mode()
-            self._set_z_ref_enabled(
-                self.current_mode == ControllerMode.UP_DOWN
-                and self.pending_motion_target_deg is None
-            )
-            self.get_logger().info(
-                "Startup pose reached. "
-                f"Entering {self.current_mode.value} mode"
-            )
-            return
+            self._publish_startup_complete()
 
-        if self.current_mode == ControllerMode.FRONT_BACK:
-            self._update_front_back_joint0_control()
-
-        if self.pending_motion_target_deg is not None:
-            if not self._target_reached(
-                self.pending_motion_target_deg,
-                self.pending_motion_mask,
-            ):
-                return
-
-            self.get_logger().info(
-                f"{self.pending_motion_description} reached within {self.position_tolerance_deg:.1f} deg"
-            )
-            if self.current_mode == ControllerMode.FRONT_BACK:
-                self._redamp_joint0_after_mode_target()
-            self._clear_pending_motion()
-            self._set_z_ref_enabled(self.current_mode == ControllerMode.UP_DOWN)
-
-        current_value_ma = float(self.latest_current_ma[self.current_joint_index])
-        if current_value_ma > self.current_threshold_ma:
-            if not self.current_switch_latched:
-                next_mode = (
-                    ControllerMode.UP_DOWN
-                    if self.current_mode == ControllerMode.FRONT_BACK
-                    else ControllerMode.FRONT_BACK
-                )
-                self.current_switch_latched = True
-                self.current_mode = next_mode
-                if self.current_mode != ControllerMode.FRONT_BACK:
-                    self._clear_pending_joint0_target()
-                    self.joint0_velocity_was_above_high_threshold = False
-                    self.joint0_is_damped = False
-                self._apply_mode_targets(next_mode)
+            if not self.startup_started:
+                self.startup_started = True
                 self._set_z_ref_enabled(False)
-                self._publish_mode()
-                self.get_logger().info(
-                    f"Current {current_value_ma:.1f} mA exceeded threshold; switched to {self.current_mode.value}"
+                self.commanded_arm_pose_deg = self.startup_pose_deg.copy()
+                self.pending_motion_target_deg = self.commanded_arm_pose_deg.copy()
+                self.pending_motion_mask = np.ones(ARM_JOINT_COUNT, dtype=bool)
+                self.pending_motion_description = "startup pose"
+                self._publish_pose_command(
+                    self.commanded_arm_pose_deg,
+                    velocity_deg_s=self.startup_velocity_deg_s,
                 )
-            return
+                self.get_logger().info(
+                    "Published startup pose and waiting for position convergence "
+                    f"within {self.position_tolerance_deg:.1f} deg before mode switching"
+                )
+                self._update_status()
+                return
 
-        self.current_switch_latched = False
+            if not self.startup_complete:
+                if not self._target_reached(
+                    self.pending_motion_target_deg,
+                    self.pending_motion_mask,
+                ):
+                    self._update_status()
+                    return
+
+                self.startup_complete = True
+                self._clear_pending_motion()
+                self.current_mode = self._infer_mode(self.latest_feedback_deg)
+                self._publish_mode()
+                self._set_z_ref_enabled(
+                    self.current_mode == ControllerMode.UP_DOWN
+                    and self.pending_motion_target_deg is None
+                )
+                self.get_logger().info(
+                    "Startup pose reached. "
+                    f"Entering {self.current_mode.value} mode"
+                )
+                self._update_status()
+                return
+
+            if self.current_mode == ControllerMode.FRONT_BACK:
+                self._update_front_back_joint0_control()
+
+            if self.pending_motion_target_deg is not None:
+                if not self._target_reached(
+                    self.pending_motion_target_deg,
+                    self.pending_motion_mask,
+                ):
+                    self._update_status()
+                    return
+
+                self.get_logger().info(
+                    f"{self.pending_motion_description} reached within {self.position_tolerance_deg:.1f} deg"
+                )
+                if self.current_mode == ControllerMode.FRONT_BACK:
+                    self._redamp_joint0_after_mode_target()
+                self._clear_pending_motion()
+                self._set_z_ref_enabled(self.current_mode == ControllerMode.UP_DOWN)
+
+            current_value_ma = float(self.latest_current_ma[self.current_joint_index])
+            if current_value_ma > self.current_threshold_ma:
+                if not self.current_switch_latched:
+                    next_mode = (
+                        ControllerMode.UP_DOWN
+                        if self.current_mode == ControllerMode.FRONT_BACK
+                        else ControllerMode.FRONT_BACK
+                    )
+                    self.current_switch_latched = True
+                    self.current_mode = next_mode
+                    if self.current_mode != ControllerMode.FRONT_BACK:
+                        self._clear_pending_joint0_target()
+                        self.joint0_velocity_was_above_high_threshold = False
+                        self.joint0_is_damped = False
+                    self._apply_mode_targets(next_mode)
+                    self._set_z_ref_enabled(False)
+                    self._publish_mode()
+                    self.get_logger().info(
+                        f"Current {current_value_ma:.1f} mA exceeded threshold; switched to {self.current_mode.value}"
+                    )
+                self._update_status()
+                return
+
+            self.current_switch_latched = False
+            self._update_status()
+        finally:
+            loop_time_ms = (time.perf_counter() - loop_start) * 1000.0
+            self._record_loop_time_ms(loop_time_ms)
 
     def _apply_mode_targets(self, mode: ControllerMode) -> None:
         if mode == ControllerMode.FRONT_BACK:

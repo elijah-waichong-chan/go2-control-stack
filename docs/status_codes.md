@@ -4,7 +4,7 @@ This file is the central reference for status topics in this repo.
 
 ## Status Message Type
 
-All current `/status/...` topics use `go2_msgs/LoopStatus`.
+All current `/status/...` topics use `hq_pcot_msgs/LoopStatus`.
 
 Fields:
 
@@ -24,7 +24,7 @@ Current convention:
 
 ### `/status/loco_ctrl`
 
-Message type: `go2_msgs/LoopStatus`
+Message type: `hq_pcot_msgs/LoopStatus`
 
 Source: `locomotion_controller/policy_controller.py`
 
@@ -35,7 +35,7 @@ Source: `locomotion_controller/policy_controller.py`
 
 ### `/status/standing_init`
 
-Message type: `go2_msgs/LoopStatus`
+Message type: `hq_pcot_msgs/LoopStatus`
 
 Source: `locomotion_controller/standup_init.py`
 
@@ -45,7 +45,7 @@ Source: `locomotion_controller/standup_init.py`
 
 ### `/status/intent_estimator/left_right`
 
-Message type: `go2_msgs/LoopStatus`
+Message type: `hq_pcot_msgs/LoopStatus`
 
 Source: `intent_estimator/left_right_intent_estimator.py`
 
@@ -54,7 +54,7 @@ Source: `intent_estimator/left_right_intent_estimator.py`
 
 ### `/status/intent_estimator/front_back`
 
-Message type: `go2_msgs/LoopStatus`
+Message type: `hq_pcot_msgs/LoopStatus`
 
 Source: `intent_estimator/front_back_intent_estimator.py`
 
@@ -63,9 +63,31 @@ Source: `intent_estimator/front_back_intent_estimator.py`
 
 ### `/status/intent_estimator/up_down`
 
-Message type: `go2_msgs/LoopStatus`
+Message type: `hq_pcot_msgs/LoopStatus`
 
 Source: `intent_estimator/up_down_intent_estimator.py`
+
+- `1`: running
+- `2`: waiting for required input topics
+
+### `/status/arm_controller`
+
+Message type: `hq_pcot_msgs/LoopStatus`
+
+Source: `arm_pink_controller/d1_pink_mode_switch_controller.py`
+
+- `1`: running
+- `2`: waiting for fresh `/arm/servo_feedback`
+- `3`: startup sequence active
+
+### `/status/coordination_module`
+
+Message type: `hq_pcot_msgs/LoopStatus`
+
+Source:
+
+- `coordination_module/intent_command_coordinator.py` for autonomous mode
+- `coordination_module/teleop_coordinator.py` for tele-op mode
 
 - `1`: running
 - `2`: waiting for required input topics

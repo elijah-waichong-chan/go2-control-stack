@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 from collections import deque
+import math
 import time
 
 import rclpy
-from hq_pcot_msgs.msg import ArmTask, LocomotionCmd
+from hq_pcot_msgs.msg import ArmTask, LocomotionCmd, LoopStatus
 from icon_lab_d1_ros2.msg import ServoFeedback
 from rclpy.node import Node
 from rclpy.qos import (
@@ -20,9 +21,39 @@ from std_msgs.msg import Int32
 from unitree_go.msg import WirelessController
 
 
-class IntentCommandCoordinator(Node):
+def _make_loop_status(
+    status_code: int,
+    avg_loop_ms: float = -1.0,
+    p99_loop_ms: float = -1.0,
+    max_loop_ms: float = -1.0,
+    budget_ms: float = -1.0,
+    deadline_miss_count: int = -1,
+    sample_count: int = -1,
+) -> LoopStatus:
+    msg = LoopStatus()
+    msg.status = int(status_code)
+    msg.avg_loop_ms = float(avg_loop_ms)
+    msg.p99_loop_ms = float(p99_loop_ms)
+    msg.max_loop_ms = float(max_loop_ms)
+    msg.budget_ms = float(budget_ms)
+    msg.deadline_miss_count = int(deadline_miss_count)
+    msg.sample_count = int(sample_count)
+    return msg
+
+
+def _percentile99(samples: deque[float]) -> float:
+    if not samples:
+        return -1.0
+    ordered = sorted(samples)
+    idx = max(0, math.ceil(0.99 * len(ordered)) - 1)
+    return float(ordered[min(idx, len(ordered) - 1)])
+
+
+class AutonomousCoordinator(Node):
     """Generate base commands and arm tasks from filtered transport intents."""
 
+    STATUS_RUNNING = 1
+    STATUS_WAITING_FOR_TOPICS = 2
     L1_BUTTON_MASK = 1 << 1
     FRONT_BACK_ARM_POSE = [90.0, -10.0, 10.0, -85.0, -3.0, -90.0]
     FRONT_BACK_PRESET_MASK = (1, 1, 1, 1, 1, 1)
@@ -40,7 +71,7 @@ class IntentCommandCoordinator(Node):
     MOTION_SETTLE_DELAY_S = 2.0
 
     def __init__(self) -> None:
-        super().__init__("intent_command_coordinator")
+        super().__init__("autonomous_coordinator")
 
         self.declare_parameter("forward_backward_intent_topic", "/direction_intent/front_back/label")
         self.declare_parameter("left_right_intent_topic", "/direction_intent/left_right/label")
@@ -49,6 +80,8 @@ class IntentCommandCoordinator(Node):
         self.declare_parameter("wireless_topic", "/wirelesscontroller")
         self.declare_parameter("locomotion_cmd_topic", "/locomotion_cmd")
         self.declare_parameter("arm_task_topic", "/arm_task")
+        self.declare_parameter("status_topic", "/status/coordination_module")
+        self.declare_parameter("status_hz", 10.0)
         self.declare_parameter("publish_hz", 50.0)
         self.declare_parameter("forward_x_vel", 0.5)
         self.declare_parameter("backward_x_vel", -0.5)
@@ -82,6 +115,8 @@ class IntentCommandCoordinator(Node):
         self.wireless_topic = str(self.get_parameter("wireless_topic").value)
         self.locomotion_cmd_topic = str(self.get_parameter("locomotion_cmd_topic").value)
         self.arm_task_topic = str(self.get_parameter("arm_task_topic").value)
+        self.status_topic = str(self.get_parameter("status_topic").value)
+        self.status_hz = max(1.0, float(self.get_parameter("status_hz").value))
         self.publish_hz = max(1.0, float(self.get_parameter("publish_hz").value))
         self.forward_x_vel = float(self.get_parameter("forward_x_vel").value)
         self.backward_x_vel = float(self.get_parameter("backward_x_vel").value)
@@ -114,6 +149,8 @@ class IntentCommandCoordinator(Node):
         self.wireless_timeout_s = max(
             0.0, float(self.get_parameter("wireless_timeout_s").value)
         )
+        self.loop_budget_ms = 1000.0 / max(self.publish_hz, 1.0)
+        self.loop_stats_window = max(100, int(self.publish_hz * 10.0))
 
         self.latest_forward_backward_intent: int | None = None
         self.last_forward_backward_intent_time_ns: int | None = None
@@ -132,12 +169,23 @@ class IntentCommandCoordinator(Node):
         self.next_mode_switch_time = 0.0
         self.latest_wireless_keys = 0
         self.last_wireless_time: float | None = None
+        self.status_code = self.STATUS_WAITING_FOR_TOPICS
+        self.waiting_on: str | None = None
+        self.running_logged = False
+        self.loop_times_ms: deque[float] = deque(maxlen=self.loop_stats_window)
+        self.deadline_flags: deque[int] = deque(maxlen=self.loop_stats_window)
 
         qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=10,
             reliability=QoSReliabilityPolicy.RELIABLE,
             durability=QoSDurabilityPolicy.VOLATILE,
+        )
+        status_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
         wireless_qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -178,9 +226,12 @@ class IntentCommandCoordinator(Node):
         )
         self.pub_cmd = self.create_publisher(LocomotionCmd, self.locomotion_cmd_topic, qos)
         self.pub_arm_task = self.create_publisher(ArmTask, self.arm_task_topic, qos)
+        self.pub_status = self.create_publisher(LoopStatus, self.status_topic, status_qos)
         self.timer = self.create_timer(1.0 / self.publish_hz, self.on_timer)
+        self.status_timer = self.create_timer(1.0 / self.status_hz, self.on_status_timer)
+        self._update_status()
         self.get_logger().info(
-            "intent_command_coordinator ready: "
+            "autonomous_coordinator ready: "
             f"{self.forward_backward_intent_topic} + {self.left_right_intent_topic} + "
             f"{self.up_down_intent_topic} + {self.arm_feedback_topic} + {self.wireless_topic} -> "
             f"{self.locomotion_cmd_topic} + {self.arm_task_topic}, "
@@ -212,10 +263,68 @@ class IntentCommandCoordinator(Node):
             return
         self.latest_arm_angles_deg = [float(value) for value in msg.angle_deg[:6]]
         self.latest_arm_currents = [float(value) for value in msg.current_ma[:6]]
+        self._update_status()
 
     def on_wireless(self, msg: WirelessController) -> None:
         self.latest_wireless_keys = int(msg.keys) & 0xFFFF
         self.last_wireless_time = time.monotonic()
+
+    def _set_status(self, status_code: int) -> None:
+        status_code = int(status_code)
+        if status_code == self.status_code:
+            return
+        self.status_code = status_code
+        self._publish_status()
+
+    def on_status_timer(self) -> None:
+        self._publish_status()
+
+    def _record_loop_time_ms(self, loop_time_ms: float) -> None:
+        self.loop_times_ms.append(float(loop_time_ms))
+        self.deadline_flags.append(1 if loop_time_ms > self.loop_budget_ms else 0)
+
+    def _publish_status(self) -> None:
+        if not self.loop_times_ms:
+            self.pub_status.publish(
+                _make_loop_status(
+                    self.status_code,
+                    budget_ms=self.loop_budget_ms,
+                )
+            )
+            return
+
+        max_loop_ms = max(self.loop_times_ms)
+        avg_loop_ms = sum(self.loop_times_ms) / len(self.loop_times_ms)
+        p99_loop_ms = _percentile99(self.loop_times_ms)
+        deadline_miss_count = sum(self.deadline_flags)
+        sample_count = len(self.loop_times_ms)
+        self.pub_status.publish(
+            _make_loop_status(
+                self.status_code,
+                avg_loop_ms=avg_loop_ms,
+                p99_loop_ms=p99_loop_ms,
+                max_loop_ms=max_loop_ms,
+                budget_ms=self.loop_budget_ms,
+                deadline_miss_count=deadline_miss_count,
+                sample_count=sample_count,
+            )
+        )
+
+    def _update_status(self) -> None:
+        if self.latest_arm_angles_deg is None:
+            if self.waiting_on != self.arm_feedback_topic:
+                self.get_logger().info(
+                    f"autonomous_coordinator waiting for {self.arm_feedback_topic}..."
+                )
+                self.waiting_on = self.arm_feedback_topic
+            self._set_status(self.STATUS_WAITING_FOR_TOPICS)
+            return
+
+        self.waiting_on = None
+        self._set_status(self.STATUS_RUNNING)
+        if not self.running_logged:
+            self.get_logger().info("autonomous_coordinator running")
+            self.running_logged = True
 
     def _is_l1_held(self) -> bool:
         if self.last_wireless_time is None:
@@ -331,7 +440,7 @@ class IntentCommandCoordinator(Node):
     ) -> ArmTask:
         msg = ArmTask()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "intent_command_coordinator"
+        msg.header.frame_id = "autonomous_coordinator"
         msg.task = int(task_type)
         msg.z_motion_direction = 0
         msg.preset_joint_configuration_deg = [
@@ -343,7 +452,7 @@ class IntentCommandCoordinator(Node):
     def _build_tracking_task(self, task_type: int, z_motion_direction: int = 0) -> ArmTask:
         msg = ArmTask()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "intent_command_coordinator"
+        msg.header.frame_id = "autonomous_coordinator"
         msg.task = int(task_type)
         msg.z_motion_direction = int(z_motion_direction)
         return msg
@@ -438,23 +547,29 @@ class IntentCommandCoordinator(Node):
         return self._build_tracking_task(ArmTask.TASK_FRONT_BACK_TRACK)
 
     def on_timer(self) -> None:
-        locomotion_msg = LocomotionCmd()
-        locomotion_msg.stamp = self.get_clock().now().to_msg()
-        locomotion_msg.x_vel = self.compute_x_vel()
-        locomotion_msg.y_vel = self.compute_y_vel()
-        locomotion_msg.z_pos = self.z_pos
-        locomotion_msg.yaw_rate = 0.0
-        if not self._is_l1_held():
-            self.pub_cmd.publish(locomotion_msg)
+        start_ns = time.perf_counter_ns()
+        try:
+            self._update_status()
+            locomotion_msg = LocomotionCmd()
+            locomotion_msg.stamp = self.get_clock().now().to_msg()
+            locomotion_msg.x_vel = self.compute_x_vel()
+            locomotion_msg.y_vel = self.compute_y_vel()
+            locomotion_msg.z_pos = self.z_pos
+            locomotion_msg.yaw_rate = 0.0
+            if not self._is_l1_held():
+                self.pub_cmd.publish(locomotion_msg)
 
-        arm_task = self._compute_arm_task()
-        if arm_task is not None:
-            self.pub_arm_task.publish(arm_task)
+            arm_task = self._compute_arm_task()
+            if arm_task is not None:
+                self.pub_arm_task.publish(arm_task)
+        finally:
+            loop_time_ms = (time.perf_counter_ns() - start_ns) / 1e6
+            self._record_loop_time_ms(loop_time_ms)
 
 
 def main() -> None:
     rclpy.init()
-    node = IntentCommandCoordinator()
+    node = AutonomousCoordinator()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

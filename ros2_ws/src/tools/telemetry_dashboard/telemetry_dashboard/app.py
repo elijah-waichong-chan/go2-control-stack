@@ -11,9 +11,14 @@ import streamlit as st
 import rclpy
 from icon_lab_d1_ros2.msg import ServoCommand, ServoFeedback
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
+from rclpy.qos import (
+    QoSDurabilityPolicy,
+    QoSHistoryPolicy,
+    QoSProfile,
+    QoSReliabilityPolicy,
+)
 
-from hq_pcot_msgs.msg import ArmCommand, LocomotionCmd, LoopStatus
+from hq_pcot_msgs.msg import ArmCommand, ArmTask, LocomotionCmd, LoopStatus
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Int32
 from tf2_msgs.msg import TFMessage
@@ -77,6 +82,7 @@ class TelemetryNode(Node):
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=1,
             reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
 
         self._lock = threading.Lock()
@@ -96,6 +102,7 @@ class TelemetryNode(Node):
             "arm_servo_feedback": "/arm/servo_feedback",
             "arm_servo_command": "/arm/servo_command",
             "arm_command_state": "/arm/commanded_angles",
+            "arm_task": "/arm_task",
             "intent_forward_backward": "/direction_intent/front_back/label",
             "intent_left_right": "/direction_intent/left_right/label",
             "intent_up_down": "/direction_intent/up_down/label",
@@ -129,6 +136,12 @@ class TelemetryNode(Node):
             ArmCommand,
             self._topic_names["arm_command_state"],
             self.on_arm_command_state,
+            qos,
+        )
+        self.create_subscription(
+            ArmTask,
+            self._topic_names["arm_task"],
+            self.on_arm_task,
             qos,
         )
         self.create_subscription(
@@ -180,6 +193,18 @@ class TelemetryNode(Node):
             lambda m: self.on_loop_status("intent_estimator_up_down", m),
             status_qos,
         )
+        self.create_subscription(
+            LoopStatus,
+            "/status/arm_controller",
+            lambda m: self.on_loop_status("arm_controller", m),
+            status_qos,
+        )
+        self.create_subscription(
+            LoopStatus,
+            "/status/coordination_module",
+            lambda m: self.on_loop_status("coordination_module", m),
+            status_qos,
+        )
         self._graph_timer = self.create_timer(
             1.0 / max(self.graph_poll_hz, 0.1),
             self._on_graph_timer,
@@ -229,6 +254,9 @@ class TelemetryNode(Node):
 
     def on_arm_command_state(self, msg: ArmCommand) -> None:
         self._mark_topic("arm_command_state")
+
+    def on_arm_task(self, msg: ArmTask) -> None:
+        self._mark_topic("arm_task")
 
     def _mark_topic(self, key: str) -> None:
         with self._lock:
@@ -561,6 +589,27 @@ def _get_state_converter_status(
     }
 
 
+def _get_arm_controller_status(
+    status_map: Dict[str, Tuple[object, float]], now: float, timeout: float
+) -> Dict[str, object]:
+    return {
+        "controller_running": launch_process_manager.is_arm_controller_running(),
+        "status_value": _get_fresh_status(status_map, "arm_controller", now, timeout),
+    }
+
+
+def _get_coordination_module_status(
+    status_map: Dict[str, Tuple[object, float]], now: float, timeout: float
+) -> Dict[str, object]:
+    return {
+        "coordinator_running": launch_process_manager.is_coordination_module_running(),
+        "mode": launch_process_manager.get_active_coordination_module_mode(),
+        "status_value": _get_fresh_status(status_map, "coordination_module", now, timeout),
+        "locomotion_cmd": _get_fresh_status(status_map, "locomotion_cmd", now, timeout) is True,
+        "arm_task": _get_fresh_status(status_map, "arm_task", now, timeout) is True,
+    }
+
+
 def _format_timing_ms(value: object) -> str:
     try:
         value_f = float(value)
@@ -655,6 +704,37 @@ def _module_summary(key: str, value: object) -> tuple[str, str]:
             return "warning", "waiting for topics"
         return "error", "not running"
 
+    if key == "arm_controller":
+        if not isinstance(value, dict):
+            return "error", "not running"
+        controller_running = bool(value.get("controller_running"))
+        status_value = value.get("status_value")
+        status_code = _status_code(status_value)
+        if controller_running and status_code == 1:
+            return "success", "running"
+        if controller_running and status_code == 3:
+            return "info", "startup sequence"
+        if controller_running and status_code == 2:
+            return "warning", "waiting for /arm/servo_feedback"
+        if controller_running:
+            return "warning", "starting"
+        return "error", "not running"
+
+    if key == "coordination_module":
+        if not isinstance(value, dict):
+            return "error", "not running"
+        coordinator_running = bool(value.get("coordinator_running"))
+        mode = str(value.get("mode") or "").replace("_", "-")
+        status_value = value.get("status_value")
+        status_code = _status_code(status_value)
+        if coordinator_running and status_code == 1:
+            return "success", f"{mode or 'active'} running"
+        if coordinator_running and status_code == 2:
+            return "warning", f"{mode or 'active'} waiting for input"
+        if coordinator_running:
+            return "warning", "starting"
+        return "error", "not running"
+
     if bool(value):
         return "success", "running"
     return "error", "not running"
@@ -722,6 +802,34 @@ def _render_state_converter_details(value: object) -> None:
     st.write(f"/tf: `{'fresh' if value.get('tf') else 'missing'}`")
 
 
+def _render_arm_controller_details(value: object) -> None:
+    st.caption("Process and status topic")
+    if not isinstance(value, dict):
+        st.caption("No process status available.")
+        return
+
+    st.write(
+        f"Arm Controller: `{'running' if value.get('controller_running') else 'stopped'}`"
+    )
+    _render_loop_status_details("/status/arm_controller", value.get("status_value"))
+
+
+def _render_coordination_module_details(value: object) -> None:
+    st.caption("Process, status topic, and outputs")
+    if not isinstance(value, dict):
+        st.caption("No process status available.")
+        return
+
+    st.write(
+        f"Coordination Module: `{'running' if value.get('coordinator_running') else 'stopped'}`"
+    )
+    if value.get("mode"):
+        st.write(f"Mode: `{str(value.get('mode')).replace('_', '-')}`")
+    st.write(f"/locomotion_cmd: `{'fresh' if value.get('locomotion_cmd') else 'missing'}`")
+    st.write(f"/arm_task: `{'fresh' if value.get('arm_task') else 'missing'}`")
+    _render_loop_status_details("/status/coordination_module", value.get("status_value"))
+
+
 def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
     now = time.monotonic()
     timeout = float(timeout_s)
@@ -733,17 +841,23 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
     locomotion_value, locomotion_topic = _get_locomotion_status(status_map, now, timeout)
     icon_lab_d1_value = _get_icon_lab_d1_status(status_map, now, timeout)
     state_converter_value = _get_state_converter_status(status_map, now, timeout)
+    arm_controller_value = _get_arm_controller_status(status_map, now, timeout)
+    coordination_module_value = _get_coordination_module_status(status_map, now, timeout)
 
     status_view = {
         "icon_lab_d1_ros2": icon_lab_d1_value,
         "state_converter_stack": state_converter_value,
         "locomotion": locomotion_value,
+        "arm_controller": arm_controller_value,
+        "coordination_module": coordination_module_value,
         "intent_estimator": intent_estimator_value,
     }
     status_topics = {
         "icon_lab_d1_ros2": "process + /arm/servo_feedback",
         "state_converter_stack": "process + /joint_states + /imu + /tf",
         "locomotion": locomotion_topic,
+        "arm_controller": "/status/arm_controller",
+        "coordination_module": "/status/coordination_module",
         "intent_estimator": (
             intent_estimator_topic
             or next(iter(_INTENT_ESTIMATORS.values()))["status_topic"]
@@ -759,22 +873,224 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
                 _render_icon_lab_d1_details(val)
             elif key == "state_converter_stack":
                 _render_state_converter_details(val)
+            elif key == "arm_controller":
+                _render_arm_controller_details(val)
+            elif key == "coordination_module":
+                _render_coordination_module_details(val)
             elif key == "locomotion" and isinstance(val, dict):
                 _render_loop_status_details(status_topics[key], val.get("value"))
             else:
                 _render_loop_status_details(status_topics[key], val)
 
-    cols = st.columns(3)
+    rl_ctrl_status = _get_fresh_status(status_map, "loco_ctrl", now, timeout)
+    locomotion_active = (
+        (_status_code(rl_ctrl_status) is not None)
+        or launch_process_manager.is_running("control_stack")
+    )
+    coordination_module_active = launch_process_manager.is_coordination_module_running()
+    active_coordination_mode = launch_process_manager.get_active_coordination_module_mode()
+    icon_lab_d1_active = launch_process_manager.is_running("icon_lab_d1_ros2")
+    state_converter_active = launch_process_manager.is_running("state_converter_stack")
+    arm_controller_active = launch_process_manager.is_arm_controller_running()
+    active_arm_controller_mode = launch_process_manager.get_active_arm_controller_mode()
+    active_intent_estimator_modes = [
+        mode
+        for mode, config in _INTENT_ESTIMATORS.items()
+        if launch_process_manager.is_running(config["process_name"])
+    ]
+    direction_estimator_active = bool(active_intent_estimator_modes)
+    enable_front_back_estimator = st.session_state.get(
+        "ctrl_enable_front_back_estimator", True
+    )
+    enable_left_right_estimator = st.session_state.get(
+        "ctrl_enable_left_right_estimator", False
+    )
+    enable_up_down_estimator = st.session_state.get(
+        "ctrl_enable_up_down_estimator", False
+    )
+    selected_direction_estimators = []
+    if enable_front_back_estimator:
+        selected_direction_estimators.append("front_back")
+    if enable_left_right_estimator:
+        selected_direction_estimators.append("left_right")
+    if enable_up_down_estimator:
+        selected_direction_estimators.append("up_down")
+
+    cols = st.columns(4)
     with cols[0]:
+        d1_state_stack_active = icon_lab_d1_active or state_converter_active
+        d1_state_stack_label = (
+            "Stop D1 ROS2 + State Converter"
+            if d1_state_stack_active
+            else "Start D1 ROS2 + State Converter"
+        )
+        if st.button(
+            d1_state_stack_label,
+            key="toggle_d1_state_stack",
+            use_container_width=True,
+            type="primary" if d1_state_stack_active else "secondary",
+        ):
+            messages = []
+            ok = True
+            if d1_state_stack_active:
+                if state_converter_active:
+                    stop_ok, stop_msg = launch_process_manager.stop_state_converter_stack()
+                    messages.append(stop_msg)
+                    ok = ok and stop_ok
+                if icon_lab_d1_active:
+                    stop_ok, stop_msg = launch_process_manager.stop_launch("icon_lab_d1_ros2")
+                    messages.append(stop_msg)
+                    ok = ok and stop_ok
+            else:
+                start_ok, start_msg = launch_process_manager.start_launch(
+                    "icon_lab_d1_ros2",
+                    "icon_lab_d1_ros2",
+                    "icon_lab_d1_ros2.launch.py",
+                )
+                messages.append(start_msg)
+                ok = ok and start_ok
+                if ok:
+                    start_ok, start_msg = launch_process_manager.start_state_converter_stack()
+                    messages.append(start_msg)
+                    ok = ok and start_ok
+            if ok:
+                st.info("; ".join(messages))
+            else:
+                st.warning("; ".join(messages))
         _render_module_card("icon_lab_d1_ros2", "D1 ROS2")
         _render_module_card("state_converter_stack", "State Converter")
     with cols[1]:
+        locomotion_label = "Stop Locomotion" if locomotion_active else "Start Locomotion"
+        if st.button(
+            locomotion_label,
+            key="toggle_ctrl",
+            use_container_width=True,
+            type="primary" if locomotion_active else "secondary",
+        ):
+            if locomotion_active:
+                ok, msg = launch_process_manager.stop_launch("control_stack")
+            else:
+                ok, msg = launch_process_manager.start_launch(
+                    "control_stack",
+                    "hq_pcot",
+                    "locomotion.launch.py",
+                )
+            if ok:
+                st.info(msg)
+            else:
+                st.warning(msg)
         _render_module_card("locomotion", "Locomotion")
+        arm_controller_label = (
+            "Stop Arm Controller" if arm_controller_active else "Start Arm Controller"
+        )
+        if st.button(
+            arm_controller_label,
+            key="toggle_arm_controller",
+            use_container_width=True,
+            type="primary" if arm_controller_active else "secondary",
+        ):
+            if arm_controller_active:
+                ok, msg = launch_process_manager.stop_arm_controller()
+            else:
+                ok, msg = launch_process_manager.start_arm_controller_mode("pink_mode_switch")
+            if ok:
+                st.info(msg)
+            else:
+                st.warning(msg)
+        if active_arm_controller_mode == "pink_mode_switch":
+            st.caption("Active arm controller: D1 Pink Mode Switch")
+        _render_module_card("arm_controller", "Arm Controller")
     with cols[2]:
+        selected_coordination_mode = st.radio(
+            "Coordination Mode",
+            options=["autonomous", "teleop"],
+            format_func=lambda value: "Autonomous" if value == "autonomous" else "Tele-op",
+            key="coordination_module_mode",
+            horizontal=True,
+            label_visibility="collapsed",
+            disabled=coordination_module_active,
+        )
+        if active_coordination_mode is not None:
+            st.caption(f"Active mode: `{active_coordination_mode.replace('_', '-')}`")
+        coordination_label = (
+            "Stop Coordination Module"
+            if coordination_module_active
+            else "Start Coordination Module"
+        )
+        if st.button(
+            coordination_label,
+            key="toggle_coordination_module",
+            use_container_width=True,
+            type="primary" if coordination_module_active else "secondary",
+        ):
+            if coordination_module_active:
+                ok, msg = launch_process_manager.stop_coordination_module()
+            else:
+                ok, msg = launch_process_manager.start_coordination_module_mode(
+                    selected_coordination_mode
+                )
+            if ok:
+                st.info(msg)
+            else:
+                st.warning(msg)
+        _render_module_card("coordination_module", "Coordination Module")
+    with cols[3]:
+        if active_intent_estimator_modes:
+            active_labels = ", ".join(
+                _INTENT_ESTIMATORS[mode]["label"] for mode in active_intent_estimator_modes
+            )
+            st.caption(f"Active intent estimator: {active_labels}")
+        direction_estimator_label = (
+            "Stop Direction Estimator"
+            if direction_estimator_active
+            else "Start Direction Estimator"
+        )
+        if st.button(
+            direction_estimator_label,
+            key="toggle_intent_estimator",
+            use_container_width=True,
+            type="primary" if direction_estimator_active else "secondary",
+        ):
+            if direction_estimator_active:
+                messages = []
+                ok = True
+                for active_mode in active_intent_estimator_modes:
+                    active_config = _INTENT_ESTIMATORS[active_mode]
+                    stop_ok, stop_msg = launch_process_manager.stop_launch(
+                        active_config["process_name"]
+                    )
+                    messages.append(stop_msg)
+                    if not stop_ok:
+                        ok = False
+                        break
+                msg = "; ".join(messages)
+            else:
+                if not selected_direction_estimators:
+                    ok = False
+                    msg = "select at least one direction estimator to start"
+                else:
+                    messages = []
+                    ok = True
+                    for selected_mode in selected_direction_estimators:
+                        selected_config = _INTENT_ESTIMATORS[selected_mode]
+                        start_ok, start_msg = launch_process_manager.start_node(
+                            selected_config["process_name"],
+                            "intent_estimator",
+                            selected_config["executable"],
+                        )
+                        messages.append(start_msg)
+                        if not start_ok:
+                            ok = False
+                            break
+                    msg = "; ".join(messages)
+            if ok:
+                st.info(msg)
+            else:
+                st.warning(msg)
         _render_module_card("intent_estimator", "Intent Estimator")
 
 
-def _style_sidebar_buttons() -> None:
+def _style_action_buttons() -> None:
     start_green = "#2ecc71"
     start_border = "#27ae60"
     start_orange = "#f39c12"
@@ -782,59 +1098,59 @@ def _style_sidebar_buttons() -> None:
     stop_red = "#e74c3c"
     stop_border = "#c0392b"
     css_rules = f"""
-        [data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"] {{
+        [data-testid="stButton"] button[kind="secondary"] {{
             background-color: {start_green};
             color: #ffffff;
             border: 1px solid {start_border};
         }}
-        [data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"]:hover {{
+        [data-testid="stButton"] button[kind="secondary"]:hover {{
             background-color: {start_green};
             color: #ffffff;
             border: 1px solid {start_border};
             filter: brightness(0.96);
         }}
-        [data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"]:focus,
-        [data-testid="stSidebar"] [data-testid="stButton"] button[kind="secondary"]:focus-visible {{
+        [data-testid="stButton"] button[kind="secondary"]:focus,
+        [data-testid="stButton"] button[kind="secondary"]:focus-visible {{
             background-color: {start_green};
             color: #ffffff;
             border: 1px solid {start_border};
             box-shadow: 0 0 0 0.2rem rgba(255, 255, 255, 0.12);
         }}
-        [data-testid="stSidebar"] .st-key-toggle_foxglove [data-testid="stButton"] button[kind="secondary"],
-        [data-testid="stSidebar"] .st-key-toggle_rosbag [data-testid="stButton"] button[kind="secondary"] {{
+        .st-key-toggle_foxglove [data-testid="stButton"] button[kind="secondary"],
+        .st-key-toggle_rosbag [data-testid="stButton"] button[kind="secondary"] {{
             background-color: {start_orange};
             color: #ffffff;
             border: 1px solid {start_orange_border};
         }}
-        [data-testid="stSidebar"] .st-key-toggle_foxglove [data-testid="stButton"] button[kind="secondary"]:hover,
-        [data-testid="stSidebar"] .st-key-toggle_rosbag [data-testid="stButton"] button[kind="secondary"]:hover {{
+        .st-key-toggle_foxglove [data-testid="stButton"] button[kind="secondary"]:hover,
+        .st-key-toggle_rosbag [data-testid="stButton"] button[kind="secondary"]:hover {{
             background-color: {start_orange};
             color: #ffffff;
             border: 1px solid {start_orange_border};
             filter: brightness(0.96);
         }}
-        [data-testid="stSidebar"] .st-key-toggle_foxglove [data-testid="stButton"] button[kind="secondary"]:focus,
-        [data-testid="stSidebar"] .st-key-toggle_foxglove [data-testid="stButton"] button[kind="secondary"]:focus-visible,
-        [data-testid="stSidebar"] .st-key-toggle_rosbag [data-testid="stButton"] button[kind="secondary"]:focus,
-        [data-testid="stSidebar"] .st-key-toggle_rosbag [data-testid="stButton"] button[kind="secondary"]:focus-visible {{
+        .st-key-toggle_foxglove [data-testid="stButton"] button[kind="secondary"]:focus,
+        .st-key-toggle_foxglove [data-testid="stButton"] button[kind="secondary"]:focus-visible,
+        .st-key-toggle_rosbag [data-testid="stButton"] button[kind="secondary"]:focus,
+        .st-key-toggle_rosbag [data-testid="stButton"] button[kind="secondary"]:focus-visible {{
             background-color: {start_orange};
             color: #ffffff;
             border: 1px solid {start_orange_border};
             box-shadow: 0 0 0 0.2rem rgba(255, 255, 255, 0.12);
         }}
-        [data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"] {{
+        [data-testid="stButton"] button[kind="primary"] {{
             background-color: {stop_red};
             color: #ffffff;
             border: 1px solid {stop_border};
         }}
-        [data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"]:hover {{
+        [data-testid="stButton"] button[kind="primary"]:hover {{
             background-color: {stop_red};
             color: #ffffff;
             border: 1px solid {stop_border};
             filter: brightness(0.96);
         }}
-        [data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"]:focus,
-        [data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"]:focus-visible {{
+        [data-testid="stButton"] button[kind="primary"]:focus,
+        [data-testid="stButton"] button[kind="primary"]:focus-visible {{
             background-color: {stop_red};
             color: #ffffff;
             border: 1px solid {stop_border};
@@ -1037,39 +1353,8 @@ def _render_sidebar() -> None:
     current_node_name = st.session_state.get("ros_node_name", _PRIMARY_ROS_NODE_NAME)
 
     st.header("Settings")
-    status_map = snapshot["status"]
-    rl_ctrl_status = _get_fresh_status(
-        status_map,
-        "loco_ctrl",
-        time.monotonic(),
-        float(snapshot["status_timeout_s"]),
-    )
-    # Consider control stack active when the RL controller status stream is alive.
-    locomotion_active = (
-        (_status_code(rl_ctrl_status) is not None)
-        or launch_process_manager.is_running("control_stack")
-    )
-    autonomy_active = launch_process_manager.is_running("autonomy")
-    icon_lab_d1_active = launch_process_manager.is_running("icon_lab_d1_ros2")
     foxglove_active = launch_process_manager.is_running("foxglove_bridge")
     rosbag_active = launch_process_manager.is_running("rosbag_recording")
-    active_intent_estimator_modes = [
-        mode
-        for mode, config in _INTENT_ESTIMATORS.items()
-        if launch_process_manager.is_running(config["process_name"])
-    ]
-    state_converter_active = (
-        launch_process_manager.is_running("state_converter_stack")
-    )
-    arm_controller_active = launch_process_manager.is_arm_controller_running()
-    active_arm_controller_mode = launch_process_manager.get_active_arm_controller_mode()
-    control_label = (
-        "Stop Locomotion" if locomotion_active else "Start Locomotion"
-    )
-    enable_wireless_cmd_bridge = st.session_state.get("ctrl_enable_wireless_cmd_bridge", True)
-    arm_controller_mode_labels = {
-        "pink_mode_switch": "D1 Pink Mode Switch",
-    }
     enable_front_back_estimator = st.session_state.get(
         "ctrl_enable_front_back_estimator", True
     )
@@ -1079,177 +1364,10 @@ def _render_sidebar() -> None:
     enable_up_down_estimator = st.session_state.get(
         "ctrl_enable_up_down_estimator", False
     )
-    selected_direction_estimators = []
-    if enable_front_back_estimator:
-        selected_direction_estimators.append("front_back")
-    if enable_left_right_estimator:
-        selected_direction_estimators.append("left_right")
-    if enable_up_down_estimator:
-        selected_direction_estimators.append("up_down")
 
     st.subheader("Core Runtime")
-    if st.button(
-        control_label,
-        key="toggle_ctrl",
-        use_container_width=True,
-        type="primary" if locomotion_active else "secondary",
-    ):
-        if locomotion_active:
-            ok, msg = launch_process_manager.stop_launch("control_stack")
-        else:
-            ok, msg = launch_process_manager.start_launch(
-                "control_stack",
-                "hq_pcot",
-                "locomotion.launch.py",
-                launch_args={
-                    "enable_wireless_cmd_bridge": str(enable_wireless_cmd_bridge).lower(),
-                },
-            )
-        if ok:
-            st.info(msg)
-        else:
-            st.warning(msg)
-    with st.expander("Locomotion Options", expanded=False):
-        enable_wireless_cmd_bridge = st.checkbox(
-            "Wireless Cmd Bridge",
-            value=enable_wireless_cmd_bridge,
-            key="ctrl_enable_wireless_cmd_bridge",
-        )
-    d1_state_stack_active = icon_lab_d1_active or state_converter_active
-    d1_state_stack_label = (
-        "Stop D1 ROS2 + State Converter"
-        if d1_state_stack_active
-        else "Start D1 ROS2 + State Converter"
-    )
-    if st.button(
-        d1_state_stack_label,
-        key="toggle_d1_state_stack",
-        use_container_width=True,
-        type="primary" if d1_state_stack_active else "secondary",
-    ):
-        messages = []
-        ok = True
-        if d1_state_stack_active:
-            if state_converter_active:
-                stop_ok, stop_msg = launch_process_manager.stop_state_converter_stack()
-                messages.append(stop_msg)
-                ok = ok and stop_ok
-            if icon_lab_d1_active:
-                stop_ok, stop_msg = launch_process_manager.stop_launch("icon_lab_d1_ros2")
-                messages.append(stop_msg)
-                ok = ok and stop_ok
-        else:
-            start_ok, start_msg = launch_process_manager.start_launch(
-                "icon_lab_d1_ros2",
-                "icon_lab_d1_ros2",
-                "icon_lab_d1_ros2.launch.py",
-            )
-            messages.append(start_msg)
-            ok = ok and start_ok
-            if ok:
-                start_ok, start_msg = launch_process_manager.start_state_converter_stack()
-                messages.append(start_msg)
-                ok = ok and start_ok
-        msg = "; ".join(messages)
-        if ok:
-            st.info(msg)
-        else:
-            st.warning(msg)
-    arm_controller_label = (
-        "Stop Arm Controller" if arm_controller_active else "Start Arm Controller"
-    )
-    if st.button(
-        arm_controller_label,
-        key="toggle_arm_controller",
-        use_container_width=True,
-        type="primary" if arm_controller_active else "secondary",
-    ):
-        if arm_controller_active:
-            ok, msg = launch_process_manager.stop_arm_controller()
-        else:
-            ok, msg = launch_process_manager.start_arm_controller_mode("pink_mode_switch")
-        if ok:
-            st.info(msg)
-        else:
-            st.warning(msg)
-    if active_arm_controller_mode in arm_controller_mode_labels:
-        st.caption(
-            "Active arm controller: "
-            + arm_controller_mode_labels[active_arm_controller_mode]
-        )
-    autonomy_label = "Stop Autonomy" if autonomy_active else "Start Autonomy"
-    if st.button(
-        autonomy_label,
-        key="toggle_autonomy",
-        use_container_width=True,
-        type="primary" if autonomy_active else "secondary",
-    ):
-        if autonomy_active:
-            ok, msg = launch_process_manager.stop_launch("autonomy")
-        else:
-            ok, msg = launch_process_manager.start_node(
-                "autonomy",
-                "coordination_module",
-                "intent_command_coordinator",
-            )
-        if ok:
-            st.info(msg)
-        else:
-            st.warning(msg)
+    st.caption("Runtime start/stop controls are shown above the module cards.")
     st.subheader("Intent")
-    if active_intent_estimator_modes:
-        active_labels = ", ".join(
-            _INTENT_ESTIMATORS[mode]["label"] for mode in active_intent_estimator_modes
-        )
-        st.caption(f"Active intent estimator: {active_labels}")
-    direction_estimator_active = bool(active_intent_estimator_modes)
-    direction_estimator_label = (
-        "Stop Direction Estimator"
-        if direction_estimator_active
-        else "Start Direction Estimator"
-    )
-    if st.button(
-        direction_estimator_label,
-        key="toggle_intent_estimator",
-        use_container_width=True,
-        type="primary" if direction_estimator_active else "secondary",
-    ):
-        if direction_estimator_active:
-            messages = []
-            ok = True
-            for active_mode in active_intent_estimator_modes:
-                active_config = _INTENT_ESTIMATORS[active_mode]
-                stop_ok, stop_msg = launch_process_manager.stop_launch(
-                    active_config["process_name"]
-                )
-                messages.append(stop_msg)
-                if not stop_ok:
-                    ok = False
-                    break
-            msg = "; ".join(messages)
-        else:
-            if not selected_direction_estimators:
-                ok = False
-                msg = "select at least one direction estimator to start"
-            else:
-                messages = []
-                ok = True
-                for selected_mode in selected_direction_estimators:
-                    selected_config = _INTENT_ESTIMATORS[selected_mode]
-                    start_ok, start_msg = launch_process_manager.start_node(
-                        selected_config["process_name"],
-                        "intent_estimator",
-                        selected_config["executable"],
-                    )
-                    messages.append(start_msg)
-                    if not start_ok:
-                        ok = False
-                        break
-                msg = "; ".join(messages)
-        if ok:
-            st.info(msg)
-        else:
-            st.warning(msg)
     with st.expander("Direction Estimator Options", expanded=False):
         enable_front_back_estimator = st.checkbox(
             "Front/Back Estimator",
@@ -1379,7 +1497,6 @@ def _render_sidebar() -> None:
             st.info(msg)
         else:
             st.warning(msg)
-    _style_sidebar_buttons()
 
 
 def _render_dashboard() -> None:
@@ -1417,6 +1534,7 @@ def _render_dashboard() -> None:
         (
             "HQ-PCoT",
             [
+                ("arm_task", "arm_task"),
                 ("locomotion_cmd", "locomotion_cmd"),
                 ("imu", "imu"),
                 ("joint_states", "joint_states"),
@@ -1576,8 +1694,9 @@ if hasattr(st, "fragment"):
 
 
 def main() -> None:
-    st.set_page_config(layout="wide", page_title="Go2 Telemetry")
-    st.title("Go2 Telemetry Dashboard")
+    st.set_page_config(layout="wide", page_title="HQ-PCoT Telemetry")
+    st.title("HQ-PCoT Telemetry Dashboard")
+    _style_action_buttons()
 
     node_name = _PRIMARY_ROS_NODE_NAME
     st.session_state["ros_node_name"] = node_name

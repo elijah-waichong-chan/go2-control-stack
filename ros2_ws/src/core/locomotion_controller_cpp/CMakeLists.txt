@@ -59,10 +59,6 @@ add_executable(stand_up_init src/stand_up_init.cpp)
 target_link_libraries(stand_up_init locomotion_controller_cpp_common)
 ament_target_dependencies(stand_up_init rclcpp hq_pcot_msgs unitree_go)
 
-add_executable(wireless_cmd_bridge src/wireless_cmd_bridge.cpp)
-target_link_libraries(wireless_cmd_bridge locomotion_controller_cpp_common)
-ament_target_dependencies(wireless_cmd_bridge rclcpp hq_pcot_msgs unitree_go)
-
 add_executable(policy_controller src/policy_controller.cpp)
 target_include_directories(policy_controller PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
 target_link_libraries(
@@ -87,7 +83,6 @@ install(
 install(
   TARGETS
     stand_up_init
-    wireless_cmd_bridge
     policy_controller
   DESTINATION lib/${PROJECT_NAME}
 )

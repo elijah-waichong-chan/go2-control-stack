@@ -25,6 +25,8 @@ setup(
     entry_points={
         "console_scripts": [
             "intent_command_coordinator = coordination_module.intent_command_coordinator:main",
+            "autonomous_coordinator = coordination_module.intent_command_coordinator:main",
+            "teleop_coordinator = coordination_module.teleop_coordinator:main",
         ],
     },
 )
