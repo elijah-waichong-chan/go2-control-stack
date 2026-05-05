@@ -77,7 +77,7 @@ class D1PinkZRefController(Node):
         self.declare_parameter("status_topic", "/status/arm_z_ref_controller")
         self.declare_parameter("status_hz", 10.0)
         self.declare_parameter("control_rate_hz", 20.0)
-        self.declare_parameter("z_ref_min_m", -0.09)
+        self.declare_parameter("z_ref_min_m", 0.15)
         self.declare_parameter("z_ref_max_m", 0.50)
         self.declare_parameter("max_abs_z_velocity_mps", 0.20)
         self.declare_parameter("startup_velocity_deg_s", self.STARTUP_VELOCITY_DEG_S)

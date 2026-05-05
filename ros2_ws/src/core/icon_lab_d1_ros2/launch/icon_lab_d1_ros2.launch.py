@@ -56,7 +56,7 @@ def generate_launch_description():
         output="screen",
         parameters=[
             {
-                "command_topic": ros_command_topic,
+                "command_topic": ros_command_input_topic,
                 "udp_address": command_udp_address,
             }
         ],
