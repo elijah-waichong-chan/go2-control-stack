@@ -100,6 +100,7 @@ class TelemetryNode(Node):
             "joint_states": "/joint_states",
             "tf": "/tf",
             "arm_servo_feedback": "/arm/servo_feedback",
+            "arm_servo_command_input": "/arm/servo_command_input",
             "arm_servo_command": "/arm/servo_command",
             "arm_command_state": "/arm/commanded_angles",
             "arm_task": "/arm_task",
@@ -133,6 +134,12 @@ class TelemetryNode(Node):
             ServoFeedback,
             self._topic_names["arm_servo_feedback"],
             self.on_arm_servo_feedback,
+            qos,
+        )
+        self.create_subscription(
+            ServoCommand,
+            self._topic_names["arm_servo_command_input"],
+            self.on_arm_servo_command_input,
             qos,
         )
         self.create_subscription(
@@ -319,6 +326,9 @@ class TelemetryNode(Node):
 
     def on_arm_servo_feedback(self, msg: ServoFeedback) -> None:
         self._mark_topic("arm_servo_feedback")
+
+    def on_arm_servo_command_input(self, msg: ServoCommand) -> None:
+        self._mark_topic("arm_servo_command_input")
 
     def on_arm_servo_command(self, msg: ServoCommand) -> None:
         self._mark_topic("arm_servo_command")
@@ -1627,6 +1637,7 @@ def _render_dashboard() -> None:
             "Unitree D1 Arm",
             [
                 ("arm_servo_feedback", "arm_servo_feedback"),
+                ("arm_servo_command_input", "arm_servo_command_input"),
                 ("arm_servo_command", "arm_servo_command"),
                 ("arm_command_state", "arm_command_state"),
             ],
