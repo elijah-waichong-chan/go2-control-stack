@@ -1,0 +1,63 @@
+model:
+  format: onnx
+  path: intent_up_down_gru_ud1_e060.onnx
+  input_name: input
+  output_name: logits
+  opset_version: 18
+  input_layout: NCT
+  dynamic_batch: true
+  num_features: 18
+  num_timesteps: 10
+  sampling_hz: 200
+  window_ms: 50
+architecture:
+  model_type: gru
+  gru_hidden_dim: 64
+  gru_num_layers: 1
+  gru_bidirectional: true
+  classifier_hidden_dim: 128
+  dropout: 0.2
+features:
+  selected:
+  - name: arm_angles
+    source_start: 31
+    source_end: 34
+    width: 3
+  - name: arm_velocities
+    source_start: 37
+    source_end: 40
+    width: 3
+  - name: last_action
+    source_start: 40
+    source_end: 43
+    width: 3
+labels:
+  raw_label_set: [0, 5, 6]
+  label_to_index:
+    0: 0
+    5: 1
+    6: 2
+  index_to_label:
+    0: 0
+    1: 5
+    2: 6
+inference:
+  output_type: logits
+  postprocess: softmax
+  prediction_rule: argmax
+  nonzero_prediction_threshold: 0.85
+  zero_index: 0
+  nonzero_indices: [1, 2]
+  score_smoothing:
+    method: ema
+    ema_alpha: 0.2
+    moving_average_window: 5
+preprocessing:
+  normalize: true
+  delta_features: true
+  delta_feature_mode: append
+  delta_formula: window_start_subtraction
+  num_raw_features: 9
+  gravity_comp: false
+  x_mean: [5.067054271697998, 34.36583709716797, -38.55266571044922, -0.06832875311374664, -0.4770328104496002, 0.37883561849594116, 4.730071067810059, 33.86149978637695, -38.993228912353516, -0.01703963242471218, -0.10867955535650253, 0.08605080097913742, -0.010989113710820675, -0.023952653631567955, -0.005738248582929373, -0.0018159298924729228, -0.10229280591011047, 0.10409434139728546]
+  x_std: [13.942682266235352, 33.18901443481445, 43.09761047363281, 5.784910202026367, 12.986557960510254, 14.641056060791016, 14.05289363861084, 33.5080680847168, 42.97789001464844, 1.4390469789505005, 3.365617513656616, 3.7838268280029297, 5.02210807800293, 8.028328895568848, 9.330187797546387, 1.4496724605560303, 3.401717185974121, 3.824636459350586]
