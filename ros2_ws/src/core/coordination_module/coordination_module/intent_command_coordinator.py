@@ -9,7 +9,7 @@ import time
 
 import rclpy
 from hq_pcot_msgs.msg import ArmTask, LocomotionCmd, LoopStatus
-from icon_lab_d1_ros2.msg import ServoFeedback
+from icon_lab_d1_ros2.msg import ServoCommand, ServoFeedback
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -55,6 +55,8 @@ class AutonomousCoordinator(Node):
     STATUS_RUNNING = 1
     STATUS_WAITING_FOR_TOPICS = 2
     L1_BUTTON_MASK = 1 << 1
+    B_BUTTON_MASK = 1 << 9
+    X_BUTTON_MASK = 1 << 10
     FRONT_BACK_NEUTRAL_JOINT0_DEG = 90.0
     UP_DOWN_IDLE_INTENT_LABEL = 0
     UP_DOWN_INCREASE_INTENT_LABEL = 5
@@ -70,6 +72,11 @@ class AutonomousCoordinator(Node):
         self.declare_parameter("wireless_topic", "/wirelesscontroller")
         self.declare_parameter("locomotion_cmd_topic", "/locomotion_cmd")
         self.declare_parameter("arm_task_topic", "/arm_task")
+        self.declare_parameter("gripper_command_topic", "/arm/servo_command_input")
+        self.declare_parameter("gripper_servo_index", 6)
+        self.declare_parameter("gripper_open_angle_deg", 50.0)
+        self.declare_parameter("gripper_close_angle_deg", -20.0)
+        self.declare_parameter("gripper_velocity_deg_s", 60.0)
         self.declare_parameter("status_topic", "/status/coordination_module")
         self.declare_parameter("status_hz", 10.0)
         self.declare_parameter("publish_hz", 50.0)
@@ -105,6 +112,11 @@ class AutonomousCoordinator(Node):
         self.wireless_topic = str(self.get_parameter("wireless_topic").value)
         self.locomotion_cmd_topic = str(self.get_parameter("locomotion_cmd_topic").value)
         self.arm_task_topic = str(self.get_parameter("arm_task_topic").value)
+        self.gripper_command_topic = str(self.get_parameter("gripper_command_topic").value)
+        self.gripper_servo_index = int(self.get_parameter("gripper_servo_index").value)
+        self.gripper_open_angle_deg = float(self.get_parameter("gripper_open_angle_deg").value)
+        self.gripper_close_angle_deg = float(self.get_parameter("gripper_close_angle_deg").value)
+        self.gripper_velocity_deg_s = float(self.get_parameter("gripper_velocity_deg_s").value)
         self.status_topic = str(self.get_parameter("status_topic").value)
         self.status_hz = max(1.0, float(self.get_parameter("status_hz").value))
         self.publish_hz = max(1.0, float(self.get_parameter("publish_hz").value))
@@ -139,6 +151,10 @@ class AutonomousCoordinator(Node):
         self.wireless_timeout_s = max(
             0.0, float(self.get_parameter("wireless_timeout_s").value)
         )
+        if self.gripper_servo_index < 0 or self.gripper_servo_index >= 7:
+            raise ValueError("gripper_servo_index must be between 0 and 6")
+        if self.gripper_velocity_deg_s <= 0.0:
+            raise ValueError("gripper_velocity_deg_s must be > 0")
         self.loop_budget_ms = 1000.0 / max(self.publish_hz, 1.0)
         self.loop_stats_window = max(100, int(self.publish_hz * 10.0))
 
@@ -154,6 +170,7 @@ class AutonomousCoordinator(Node):
         self.last_up_down_intent_time: float | None = None
         self.latest_arm_angles_deg: list[float] | None = None
         self.latest_wireless_keys = 0
+        self.previous_wireless_keys = 0
         self.last_wireless_time: float | None = None
         self.status_code = self.STATUS_WAITING_FOR_TOPICS
         self.waiting_on: str | None = None
@@ -212,6 +229,9 @@ class AutonomousCoordinator(Node):
         )
         self.pub_cmd = self.create_publisher(LocomotionCmd, self.locomotion_cmd_topic, qos)
         self.pub_arm_task = self.create_publisher(ArmTask, self.arm_task_topic, qos)
+        self.pub_gripper_cmd = self.create_publisher(
+            ServoCommand, self.gripper_command_topic, qos
+        )
         self.pub_status = self.create_publisher(LoopStatus, self.status_topic, status_qos)
         self.timer = self.create_timer(1.0 / self.publish_hz, self.on_timer)
         self.status_timer = self.create_timer(1.0 / self.status_hz, self.on_status_timer)
@@ -220,7 +240,9 @@ class AutonomousCoordinator(Node):
             "autonomous_coordinator ready: "
             f"{self.forward_backward_intent_topic} + {self.left_right_intent_topic} + "
             f"{self.up_down_intent_topic} + {self.arm_feedback_topic} + {self.wireless_topic} -> "
-            f"{self.locomotion_cmd_topic} + {self.arm_task_topic}, "
+            f"{self.locomotion_cmd_topic} + {self.arm_task_topic} + {self.gripper_command_topic}, "
+            f"gripper(index={self.gripper_servo_index}, open={self.gripper_open_angle_deg:.1f}deg, "
+            f"close={self.gripper_close_angle_deg:.1f}deg), "
             f"publish={self.publish_hz:.1f}Hz"
         )
 
@@ -251,7 +273,14 @@ class AutonomousCoordinator(Node):
         self._update_status()
 
     def on_wireless(self, msg: WirelessController) -> None:
-        self.latest_wireless_keys = int(msg.keys) & 0xFFFF
+        keys = int(msg.keys) & 0xFFFF
+        pressed = keys & ~self.previous_wireless_keys
+        if pressed & self.X_BUTTON_MASK:
+            self._publish_gripper_command(self.gripper_open_angle_deg)
+        if pressed & self.B_BUTTON_MASK:
+            self._publish_gripper_command(self.gripper_close_angle_deg)
+        self.previous_wireless_keys = keys
+        self.latest_wireless_keys = keys
         self.last_wireless_time = time.monotonic()
 
     def _set_status(self, status_code: int) -> None:
@@ -396,6 +425,19 @@ class AutonomousCoordinator(Node):
         msg.task = int(task_type)
         msg.z_motion_direction = int(z_motion_direction)
         return msg
+
+    def _publish_gripper_command(self, target_angle_deg: float) -> None:
+        command = ServoCommand()
+        command.header.stamp = self.get_clock().now().to_msg()
+        command.mode = [ServoCommand.MODE_IGNORE] * 7
+        command.mode[self.gripper_servo_index] = ServoCommand.MODE_POSITION_VELOCITY
+        command.angle_deg = [math.nan] * 7
+        command.angle_deg[self.gripper_servo_index] = float(target_angle_deg)
+        command.velocity_deg_s = [math.nan] * 7
+        command.velocity_deg_s[self.gripper_servo_index] = float(self.gripper_velocity_deg_s)
+        command.damping_power_mw = [0.0] * 7
+        command.interval_ms = 0
+        self.pub_gripper_cmd.publish(command)
 
     def _compute_z_motion_direction(self) -> int:
         now = time.monotonic()
