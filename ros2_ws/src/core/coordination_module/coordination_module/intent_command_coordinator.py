@@ -55,20 +55,10 @@ class AutonomousCoordinator(Node):
     STATUS_RUNNING = 1
     STATUS_WAITING_FOR_TOPICS = 2
     L1_BUTTON_MASK = 1 << 1
-    FRONT_BACK_ARM_POSE = [90.0, -10.0, 10.0, -85.0, -3.0, -90.0]
-    FRONT_BACK_PRESET_MASK = (1, 1, 1, 1, 1, 1)
-    FRONT_BACK_MODE_RANGE_DEG = (-85.0, -105.0)
     FRONT_BACK_NEUTRAL_JOINT0_DEG = 90.0
-
-    UP_DOWN_ARM_POSE = [None, None, None, 5.0, None, -90.0]
-    UP_DOWN_PRESET_MASK = (0, 0, 0, 1, 0, 1)
     UP_DOWN_IDLE_INTENT_LABEL = 0
     UP_DOWN_INCREASE_INTENT_LABEL = 5
     UP_DOWN_DECREASE_INTENT_LABEL = 6
-    UP_DOWN_MODE_RANGE_DEG = (-5.0, 5.0)
-
-    MODE_SWITCH_JOINT5_CURRENT_THRESHOLD = 30.0
-    MOTION_SETTLE_DELAY_S = 2.0
 
     def __init__(self) -> None:
         super().__init__("autonomous_coordinator")
@@ -163,10 +153,6 @@ class AutonomousCoordinator(Node):
         self.latest_up_down_intent: int | None = None
         self.last_up_down_intent_time: float | None = None
         self.latest_arm_angles_deg: list[float] | None = None
-        self.latest_arm_currents: list[float] | None = None
-        self.active_arm_mode: str | None = None
-        self.joint5_current_switch_latched = False
-        self.next_mode_switch_time = 0.0
         self.latest_wireless_keys = 0
         self.last_wireless_time: float | None = None
         self.status_code = self.STATUS_WAITING_FOR_TOPICS
@@ -262,7 +248,6 @@ class AutonomousCoordinator(Node):
         if len(msg.angle_deg) < 6:
             return
         self.latest_arm_angles_deg = [float(value) for value in msg.angle_deg[:6]]
-        self.latest_arm_currents = [float(value) for value in msg.current_ma[:6]]
         self._update_status()
 
     def on_wireless(self, msg: WirelessController) -> None:
@@ -404,51 +389,6 @@ class AutonomousCoordinator(Node):
             return 0.0
         return 0.0
 
-    def _infer_arm_mode(self) -> str | None:
-        if self.latest_arm_angles_deg is None:
-            return None
-        joint5_angle = float(self.latest_arm_angles_deg[5])
-        if min(self.FRONT_BACK_MODE_RANGE_DEG) <= joint5_angle <= max(
-            self.FRONT_BACK_MODE_RANGE_DEG
-        ):
-            return "front_back_mode"
-        if min(self.UP_DOWN_MODE_RANGE_DEG) <= joint5_angle <= max(
-            self.UP_DOWN_MODE_RANGE_DEG
-        ):
-            return "up_down_mode"
-        return "front_back_mode"
-
-    def _materialize_partial_pose(
-        self,
-        partial_pose_deg: list[float | None],
-    ) -> list[float] | None:
-        if all(value is not None for value in partial_pose_deg):
-            return [float(value) for value in partial_pose_deg]
-        if self.latest_arm_angles_deg is None:
-            return None
-        target_deg = list(self.latest_arm_angles_deg)
-        for joint_index, value in enumerate(partial_pose_deg):
-            if value is not None:
-                target_deg[joint_index] = float(value)
-        return target_deg
-
-    def _build_preset_task(
-        self,
-        task_type: int,
-        preset_joint_configuration_deg: list[float],
-        preset_joint_update_mask: tuple[int, int, int, int, int, int],
-    ) -> ArmTask:
-        msg = ArmTask()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "autonomous_coordinator"
-        msg.task = int(task_type)
-        msg.z_motion_direction = 0
-        msg.preset_joint_configuration_deg = [
-            float(value) for value in preset_joint_configuration_deg
-        ]
-        msg.preset_joint_update_mask = [int(value) for value in preset_joint_update_mask]
-        return msg
-
     def _build_tracking_task(self, task_type: int, z_motion_direction: int = 0) -> ArmTask:
         msg = ArmTask()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -456,65 +396,6 @@ class AutonomousCoordinator(Node):
         msg.task = int(task_type)
         msg.z_motion_direction = int(z_motion_direction)
         return msg
-
-    def _set_next_arm_mode(self, next_mode: str, now: float) -> ArmTask | None:
-        if next_mode == "up_down_mode":
-            target_deg = self._materialize_partial_pose(self.UP_DOWN_ARM_POSE)
-            if target_deg is None:
-                return None
-            task_msg = self._build_preset_task(
-                ArmTask.TASK_UP_DOWN_PRESET,
-                target_deg,
-                self.UP_DOWN_PRESET_MASK,
-            )
-        else:
-            target_deg = self._materialize_partial_pose(self.FRONT_BACK_ARM_POSE)
-            if target_deg is None:
-                return None
-            task_msg = self._build_preset_task(
-                ArmTask.TASK_FRONT_BACK_PRESET,
-                target_deg,
-                self.FRONT_BACK_PRESET_MASK,
-            )
-
-        self.active_arm_mode = next_mode
-        self.next_mode_switch_time = now + self.MOTION_SETTLE_DELAY_S
-        return task_msg
-
-    def _update_arm_mode_from_currents(self, now: float) -> ArmTask | None:
-        if self.latest_arm_currents is None:
-            return None
-
-        current_mode = self.active_arm_mode
-        if current_mode is None:
-            current_mode = self._infer_arm_mode()
-            if current_mode is None:
-                return None
-            self.active_arm_mode = current_mode
-
-        next_mode = current_mode
-        joint5_current = (
-            float(self.latest_arm_currents[5])
-            if len(self.latest_arm_currents) > 5
-            else 0.0
-        )
-        if joint5_current > self.MODE_SWITCH_JOINT5_CURRENT_THRESHOLD:
-            if (
-                not self.joint5_current_switch_latched
-                and now >= self.next_mode_switch_time
-            ):
-                next_mode = (
-                    "up_down_mode"
-                    if current_mode == "front_back_mode"
-                    else "front_back_mode"
-                )
-                self.joint5_current_switch_latched = True
-        else:
-            self.joint5_current_switch_latched = False
-
-        if current_mode != next_mode:
-            return self._set_next_arm_mode(next_mode, now)
-        return None
 
     def _compute_z_motion_direction(self) -> int:
         now = time.monotonic()
@@ -534,17 +415,10 @@ class AutonomousCoordinator(Node):
         if self.latest_arm_angles_deg is None:
             return None
 
-        now = time.monotonic()
-        preset_task = self._update_arm_mode_from_currents(now)
-        if preset_task is not None:
-            return preset_task
-
-        if self.active_arm_mode == "up_down_mode":
-            return self._build_tracking_task(
-                ArmTask.TASK_UP_DOWN_TRACK,
-                z_motion_direction=self._compute_z_motion_direction(),
-            )
-        return self._build_tracking_task(ArmTask.TASK_FRONT_BACK_TRACK)
+        return self._build_tracking_task(
+            ArmTask.TASK_UP_DOWN_TRACK,
+            z_motion_direction=self._compute_z_motion_direction(),
+        )
 
     def on_timer(self) -> None:
         start_ns = time.perf_counter_ns()
