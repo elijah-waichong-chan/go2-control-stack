@@ -14,13 +14,13 @@ Runtime Python dependencies are not vendored in this repo. Install them separate
 - `qpsolvers`
 - one supported QP backend such as `quadprog` or `osqp`
 
-This package no longer provides a GUI. Another node is expected to publish
-`/d1_pink/z_velocity` and `/d1_pink/enabled`.
+This package no longer provides a GUI. The unified arm controller publishes
+`/d1_pink/z_velocity` and `/d1_pink/enabled` for the Pink z-reference controller.
 
 `/d1_pink/z_ref` is published by the controller as its internal z target state.
 
 Example:
 
 ```bash
-ros2 launch arm_pink_controller arm_pink_controller_mode_switch.launch.py
+ros2 launch arm_pink_controller d1_arm_controller.launch.py
 ```

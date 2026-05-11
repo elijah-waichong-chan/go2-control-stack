@@ -13,19 +13,15 @@ from typing import Dict, Sequence, Tuple
 
 _LOCK = threading.Lock()
 _PROCESSES: Dict[str, subprocess.Popen] = {}
-_ARM_CONTROLLER_MODES = {
-    "pink_mode_switch": {
-        "process_name": "arm_pink_controller_mode_switch",
-        "command": [
-            "ros2",
-            "launch",
-            "arm_pink_controller",
-            "arm_pink_controller_mode_switch.launch.py",
-        ],
-        "success_message": (
-            "started arm_pink_controller arm_pink_controller_mode_switch.launch.py"
-        ),
-    },
+_ARM_CONTROLLER_PROCESS = {
+    "process_name": "d1_arm_controller",
+    "command": [
+        "ros2",
+        "launch",
+        "arm_pink_controller",
+        "d1_arm_controller.launch.py",
+    ],
+    "success_message": "started arm_pink_controller d1_arm_controller.launch.py",
 }
 _COORDINATION_MODULE_MODES = {
     "autonomous": {
@@ -48,8 +44,8 @@ ROSBAG_TOPICS: tuple[str, ...] = (
     "/d1_pink/solver_current_z",
     "/d1_pink/solver_target_z",
     "/d1_pink/enabled",
-    "/d1_pink/mode",
-    "/d1_pink/mode_switch_startup_complete",
+    "/d1_arm/state",
+    "/d1_arm/startup_complete",
     "/d1_pink/startup_complete",
     "/d1_pink/z_ref",
     "/d1_pink/z_velocity",
@@ -79,8 +75,8 @@ FOXGLOVE_TOPICS: tuple[str, ...] = (
     "/d1_pink/solver_current_z",
     "/d1_pink/solver_target_z",
     "/d1_pink/enabled",
-    "/d1_pink/mode",
-    "/d1_pink/mode_switch_startup_complete",
+    "/d1_arm/state",
+    "/d1_arm/startup_complete",
     "/d1_pink/startup_complete",
     "/d1_pink/z_ref",
     "/d1_pink/z_velocity",
@@ -275,30 +271,15 @@ def start_state_converter_stack() -> Tuple[bool, str]:
 
 
 def start_arm_controller() -> Tuple[bool, str]:
-    return start_arm_controller_mode("pink_mode_switch")
-
-
-def start_arm_controller_mode(mode: str) -> Tuple[bool, str]:
     with _LOCK:
-        config = _ARM_CONTROLLER_MODES.get(mode)
-        if config is None:
-            return False, f"unknown arm controller mode: {mode}"
-
-        process_name = str(config["process_name"])
-        for other_config in _ARM_CONTROLLER_MODES.values():
-            _cleanup_stale(str(other_config["process_name"]))
-        active_names = [
-            str(other_config["process_name"])
-            for other_config in _ARM_CONTROLLER_MODES.values()
-            if str(other_config["process_name"]) in _PROCESSES
-        ]
-        if active_names:
-            return False, f"arm controller already running: {', '.join(active_names)}"
-
+        process_name = str(_ARM_CONTROLLER_PROCESS["process_name"])
+        _cleanup_stale(process_name)
+        if process_name in _PROCESSES:
+            return False, f"arm controller already running: {process_name}"
         return _start_process(
             process_name,
-            config["command"],
-            str(config["success_message"]),
+            _ARM_CONTROLLER_PROCESS["command"],
+            str(_ARM_CONTROLLER_PROCESS["success_message"]),
         )
 
 
@@ -368,17 +349,7 @@ def stop_state_converter_stack() -> Tuple[bool, str]:
 
 
 def stop_arm_controller() -> Tuple[bool, str]:
-    results: list[str] = []
-    any_running = False
-    for config in _ARM_CONTROLLER_MODES.values():
-        ok, msg = stop_launch(str(config["process_name"]))
-        if ok:
-            any_running = True
-            results.append(msg)
-
-    if not any_running:
-        return False, "arm controller not running"
-    return True, "; ".join(results)
+    return stop_launch(str(_ARM_CONTROLLER_PROCESS["process_name"]))
 
 
 def stop_coordination_module() -> Tuple[bool, str]:
@@ -395,18 +366,17 @@ def stop_coordination_module() -> Tuple[bool, str]:
     return True, "; ".join(results)
 
 
-def get_active_arm_controller_mode() -> str | None:
+def get_active_arm_controller_name() -> str | None:
     with _LOCK:
-        for mode, config in _ARM_CONTROLLER_MODES.items():
-            process_name = str(config["process_name"])
-            _cleanup_stale(process_name)
-            if process_name in _PROCESSES:
-                return mode
+        process_name = str(_ARM_CONTROLLER_PROCESS["process_name"])
+        _cleanup_stale(process_name)
+        if process_name in _PROCESSES:
+            return process_name
     return None
 
 
 def is_arm_controller_running() -> bool:
-    return get_active_arm_controller_mode() is not None
+    return get_active_arm_controller_name() is not None
 
 
 def get_active_coordination_module_mode() -> str | None:
@@ -513,7 +483,7 @@ def stop_all() -> None:
         "foxglove_bridge",
         "rosbag_recording",
         "state_converter_stack",
-        "arm_pink_controller_mode_switch",
+        "d1_arm_controller",
     ):
         stop_launch(name)
     for config in _COORDINATION_MODULE_MODES.values():

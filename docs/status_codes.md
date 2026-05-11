@@ -74,7 +74,7 @@ Source: `intent_estimator/up_down_intent_estimator.py`
 
 Message type: `hq_pcot_msgs/LoopStatus`
 
-Source: `arm_pink_controller/d1_pink_mode_switch_controller.py`
+Source: `arm_pink_controller/d1_arm_controller.py`
 
 - `1`: running
 - `2`: waiting for fresh `/arm/servo_feedback`

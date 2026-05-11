@@ -1,1 +1,1 @@
-"""Pink-based D1 arm controller package."""
+"""Unified D1 arm controller package."""

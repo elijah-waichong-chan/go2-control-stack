@@ -14,7 +14,7 @@ setup(
         (
             "share/" + package_name + "/launch",
             [
-                "launch/arm_pink_controller_mode_switch.launch.py",
+                "launch/d1_arm_controller.launch.py",
             ],
         ),
         ("share/" + package_name, ["README.md"]),
@@ -28,8 +28,8 @@ setup(
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
+            "d1_arm_controller = arm_pink_controller.d1_arm_controller:main",
             "d1_pink_z_ref_controller = arm_pink_controller.d1_pink_z_ref_controller:main",
-            "d1_pink_mode_switch_controller = arm_pink_controller.d1_pink_mode_switch_controller:main",
         ],
     },
 )

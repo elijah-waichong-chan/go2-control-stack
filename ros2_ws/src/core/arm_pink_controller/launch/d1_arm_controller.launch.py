@@ -7,8 +7,8 @@ def generate_launch_description() -> LaunchDescription:
         [
             Node(
                 package="arm_pink_controller",
-                executable="d1_pink_mode_switch_controller",
-                name="d1_pink_mode_switch_controller",
+                executable="d1_arm_controller",
+                name="d1_arm_controller",
                 output="screen",
             ),
             Node(

@@ -108,8 +108,8 @@ class TelemetryNode(Node):
             "d1_pink_solver_current_z": "/d1_pink/solver_current_z",
             "d1_pink_solver_target_z": "/d1_pink/solver_target_z",
             "d1_pink_enabled": "/d1_pink/enabled",
-            "d1_pink_mode": "/d1_pink/mode",
-            "d1_pink_mode_switch_startup_complete": "/d1_pink/mode_switch_startup_complete",
+            "d1_arm_controller_state": "/d1_arm/state",
+            "d1_arm_startup_complete": "/d1_arm/startup_complete",
             "d1_pink_startup_complete": "/d1_pink/startup_complete",
             "d1_pink_z_ref": "/d1_pink/z_ref",
             "d1_pink_z_velocity": "/d1_pink/z_velocity",
@@ -186,16 +186,14 @@ class TelemetryNode(Node):
         )
         self.create_subscription(
             String,
-            self._topic_names["d1_pink_mode"],
-            lambda m: self.on_scalar_topic("d1_pink_mode", m.data),
+            self._topic_names["d1_arm_controller_state"],
+            lambda m: self.on_scalar_topic("d1_arm_controller_state", m.data),
             qos,
         )
         self.create_subscription(
             Bool,
-            self._topic_names["d1_pink_mode_switch_startup_complete"],
-            lambda m: self.on_scalar_topic(
-                "d1_pink_mode_switch_startup_complete", bool(m.data)
-            ),
+            self._topic_names["d1_arm_startup_complete"],
+            lambda m: self.on_scalar_topic("d1_arm_startup_complete", bool(m.data)),
             qos,
         )
         self.create_subscription(
@@ -682,7 +680,7 @@ def _get_arm_controller_status(
 ) -> Dict[str, object]:
     return {
         "controller_running": launch_process_manager.is_arm_controller_running(),
-        "mode_switch_status_value": _get_fresh_status(status_map, "arm_controller", now, timeout),
+        "controller_status_value": _get_fresh_status(status_map, "arm_controller", now, timeout),
         "z_ref_status_value": _get_fresh_status(status_map, "arm_z_ref_controller", now, timeout),
     }
 
@@ -797,15 +795,15 @@ def _module_summary(key: str, value: object) -> tuple[str, str]:
         if not isinstance(value, dict):
             return "error", "not running"
         controller_running = bool(value.get("controller_running"))
-        mode_switch_status = value.get("mode_switch_status_value")
+        controller_status = value.get("controller_status_value")
         z_ref_status = value.get("z_ref_status_value")
-        mode_switch_code = _status_code(mode_switch_status)
+        controller_code = _status_code(controller_status)
         z_ref_code = _status_code(z_ref_status)
-        if controller_running and mode_switch_code == 1 and z_ref_code == 1:
+        if controller_running and controller_code == 1 and z_ref_code == 1:
             return "success", "running"
-        if controller_running and (mode_switch_code == 3 or z_ref_code == 3):
+        if controller_running and (controller_code == 3 or z_ref_code == 3):
             return "info", "startup sequence"
-        if controller_running and (mode_switch_code == 2 or z_ref_code == 2):
+        if controller_running and (controller_code == 2 or z_ref_code == 2):
             return "warning", "waiting for /arm/servo_feedback"
         if controller_running:
             return "warning", "starting"
@@ -902,9 +900,9 @@ def _render_arm_controller_details(value: object) -> None:
     st.write(
         f"Arm Controller: `{'running' if value.get('controller_running') else 'stopped'}`"
     )
-    st.write("Mode Switch Controller")
+    st.write("Unified Arm Controller")
     _render_loop_status_details(
-        "/status/arm_controller", value.get("mode_switch_status_value")
+        "/status/arm_controller", value.get("controller_status_value")
     )
     st.write("Z Ref Controller")
     _render_loop_status_details(
@@ -1089,7 +1087,7 @@ def render_status(snapshot: Dict[str, object], timeout_s: float) -> None:
             if arm_controller_active:
                 ok, msg = launch_process_manager.stop_arm_controller()
             else:
-                ok, msg = launch_process_manager.start_arm_controller_mode("pink_mode_switch")
+                ok, msg = launch_process_manager.start_arm_controller()
             if ok:
                 st.info(msg)
             else:
@@ -1444,12 +1442,12 @@ def _rosbag_topic_groups(default_topics: list[str]) -> Dict[str, list[str]]:
             "/arm/servo_feedback",
             "/arm/servo_command_input",
             "/arm/servo_command",
+            "/d1_arm/state",
+            "/d1_arm/startup_complete",
             "/d1_pink/current_z",
             "/d1_pink/solver_current_z",
             "/d1_pink/solver_target_z",
             "/d1_pink/enabled",
-            "/d1_pink/mode",
-            "/d1_pink/mode_switch_startup_complete",
             "/d1_pink/startup_complete",
             "/d1_pink/z_ref",
             "/d1_pink/z_velocity",
@@ -1644,17 +1642,14 @@ def _render_dashboard() -> None:
             ],
         ),
         (
-            "D1 Pink Debug",
+            "D1 Arm Debug",
             [
                 ("arm_task", "arm_task"),
-                ("d1_pink_mode", "d1_pink_mode"),
+                ("d1_arm_controller_state", "d1_arm_controller_state"),
+                ("d1_arm_startup_complete", "d1_arm_startup_complete"),
                 ("d1_pink_enabled", "d1_pink_enabled"),
                 ("d1_pink_solver_target_z", "d1_pink_solver_target_z"),
                 ("d1_pink_solver_current_z", "d1_pink_solver_current_z"),
-                (
-                    "d1_pink_mode_switch_startup_complete",
-                    "d1_pink_mode_switch_startup_complete",
-                ),
                 ("d1_pink_startup_complete", "d1_pink_startup_complete"),
                 ("d1_pink_z_ref", "d1_pink_z_ref"),
                 ("d1_pink_z_velocity", "d1_pink_z_velocity"),
